@@ -6,6 +6,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "vapi-web": "^1.0.5",
     "vue": "^3.0.4"
   },
   "devDependencies": {

@@ -21,6 +21,7 @@ import Login from "./pages/Login.tsx";
 import Register from "./pages/Register.tsx";
 import AssessmentUpload from "./pages/AssessmentUpload.tsx";
 import Pricing from "./pages/landing/Pricing.tsx";
+import InterviewerDashboard from "./pages/interviewer/Dashboard.tsx";
 
 const queryClient = new QueryClient();
 
@@ -54,6 +55,8 @@ const App = () => (
 
 
           <Route path="/jobs" element={<Jobs />} />
+          <Route path="/interview" element={<InterviewerDashboard />} />
+
           <Route path="/jobs/create" element={<CreateJob />} />
           <Route path="/jobs/:jobId/progress" element={<JobProgress />} />
           <Route path="/candidates" element={<Candidates />} />
