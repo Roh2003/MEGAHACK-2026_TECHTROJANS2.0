@@ -4,13 +4,33 @@ import tempfile
 import PyPDF2
 import ast
 from concurrent.futures import ThreadPoolExecutor
+from typing import Iterable
 
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
+from langchain_openai import ChatOpenAI
 
 
 class ResumeAnalysisAgent:
+
+    SKILL_WEIGHT = 0.60
+    EXPERIENCE_WEIGHT = 0.25
+    CERTIFICATION_WEIGHT = 0.15
+
+    CERTIFICATION_TERMS = [
+        "aws",
+        "azure",
+        "gcp",
+        "kubernetes",
+        "docker",
+        "terraform",
+        "pmp",
+        "scrum",
+        "csm",
+        "ccna",
+        "comptia",
+        "oracle",
+        "salesforce",
+        "itil",
+    ]
 
     def __init__(self, api_key: str, cutoff_score: int = 75):
 
@@ -22,8 +42,6 @@ class ResumeAnalysisAgent:
 
         self.extracted_skills = []
         self.analysis_result = None
-
-        self.rag_vectorstore = None
 
         self.resume_strengths = []
         self.resume_weaknesses = []
@@ -63,8 +81,8 @@ class ResumeAnalysisAgent:
             return f.read()
 
     def extract_text_from_file(self, file):
-
-        ext = file.name.split(".")[-1].lower()
+        filename = getattr(file, "name", "") or ""
+        ext = filename.split(".")[-1].lower() if "." in filename else ""
 
         if ext == "pdf":
             return self.extract_text_from_pdf(file)
@@ -74,31 +92,40 @@ class ResumeAnalysisAgent:
 
         return ""
 
-    # ---------------------------------------------------
-    # VECTOR STORE
-    # ---------------------------------------------------
-
-    def create_vector_store(self, texts):
-
-        embeddings = OpenAIEmbeddings(openai_api_key=self.api_key)
-
-        return FAISS.from_texts(texts, embeddings)
+    @staticmethod
+    def _merge_skills(*skill_groups: Iterable[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for group in skill_groups:
+            for skill in group or []:
+                normalized = skill.strip()
+                key = normalized.lower()
+                if normalized and key not in seen:
+                    seen.add(key)
+                    merged.append(normalized)
+        return merged
 
     # ---------------------------------------------------
     # SKILL ANALYSIS
     # ---------------------------------------------------
 
-    def analyze_skill(self, qa_chain, skill):
+    def analyze_skill(self, resume_text, skill, jd_text=""):
 
         query = f"""
 Analyze the resume and rate the candidate proficiency in {skill}.
+
+Job description context:
+{jd_text}
+
+Resume text:
+{resume_text}
 
 Return format:
 Score: number between 0-10
 Reason: short explanation
 """
 
-        response = qa_chain.run(query)
+        response = self.llm.invoke(query).content
 
         match = re.search(r"\b(10|[0-9])\b", response)
         score = int(match.group(1)) if match else 0
@@ -113,17 +140,7 @@ Reason: short explanation
     # SEMANTIC SKILL ANALYSIS
     # ---------------------------------------------------
 
-    def semantic_skill_analysis(self, resume_text, skills):
-
-        vectorstore = self.create_vector_store([resume_text])
-
-        retriever = vectorstore.as_retriever()
-
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            retriever=retriever,
-            return_source_documents=False
-        )
+    def semantic_skill_analysis(self, resume_text, skills, jd_text=""):
 
         skill_scores = {}
         missing_skills = []
@@ -134,7 +151,7 @@ Reason: short explanation
         with ThreadPoolExecutor(max_workers=5) as executor:
 
             results = list(
-                executor.map(lambda s: self.analyze_skill(qa_chain, s), skills)
+                executor.map(lambda s: self.analyze_skill(resume_text, s, jd_text), skills)
             )
 
         for res in results:
@@ -162,6 +179,149 @@ Reason: short explanation
             "skill_scores": skill_scores,
             "strengths": strengths,
             "missing_skills": missing_skills
+        }
+
+    @staticmethod
+    def _extract_year_values(text: str) -> list[float]:
+        if not text:
+            return []
+
+        values: list[float] = []
+        normalized = text.lower()
+
+        # Matches: 3 years, 2.5 yrs, 4+ years
+        for match in re.finditer(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", normalized):
+            values.append(float(match.group(1)))
+
+        # Matches ranges: 2-4 years (takes midpoint)
+        for match in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*[-to]{1,3}\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)",
+            normalized,
+        ):
+            low = float(match.group(1))
+            high = float(match.group(2))
+            values.append((low + high) / 2)
+
+        return values
+
+    def _experience_score(self, resume_text: str, jd_text: str) -> tuple[int, dict]:
+        required_values = self._extract_year_values(jd_text)
+        candidate_values = self._extract_year_values(resume_text)
+
+        required_years = max(required_values) if required_values else 0.0
+        candidate_years = max(candidate_values) if candidate_values else 0.0
+
+        if required_years <= 0:
+            # No explicit requirement in JD; assign neutral-high if candidate mentions experience.
+            score = 75 if candidate_years > 0 else 55
+        elif candidate_years <= 0:
+            score = 20
+        else:
+            ratio = min(candidate_years / required_years, 1.2)
+            score = int(max(0, min(100, round((ratio / 1.0) * 85))))
+            if candidate_years >= required_years:
+                score = max(score, 85)
+
+        details = {
+            "required_years": round(required_years, 2),
+            "candidate_years": round(candidate_years, 2),
+        }
+        return score, details
+
+    @classmethod
+    def _find_cert_terms(cls, text: str) -> list[str]:
+        if not text:
+            return []
+
+        lowered = text.lower()
+        found: list[str] = []
+        for term in cls.CERTIFICATION_TERMS:
+            if re.search(rf"\b{re.escape(term)}\b", lowered):
+                found.append(term)
+        return found
+
+    def _certification_score(self, resume_text: str, jd_text: str) -> tuple[int, dict]:
+        jd_terms = self._find_cert_terms(jd_text)
+        resume_terms = self._find_cert_terms(resume_text)
+
+        jd_set = set(jd_terms)
+        resume_set = set(resume_terms)
+        overlap = sorted(jd_set.intersection(resume_set))
+
+        if jd_set:
+            score = int((len(overlap) / len(jd_set)) * 100)
+        else:
+            # JD does not demand certs; reward cert presence lightly.
+            score = 70 if resume_set else 60
+
+        details = {
+            "jd_cert_terms": sorted(jd_set),
+            "resume_cert_terms": sorted(resume_set),
+            "matched_cert_terms": overlap,
+        }
+        return score, details
+
+    def comprehensive_analysis(self, resume_text: str, skills: list[str], jd_text: str = "") -> dict:
+        skill_analysis = self.semantic_skill_analysis(resume_text, skills, jd_text)
+        skill_score = int(skill_analysis.get("overall_score", 0))
+
+        experience_score, experience_details = self._experience_score(resume_text, jd_text)
+        certification_score, certification_details = self._certification_score(resume_text, jd_text)
+
+        weighted_score = (
+            (skill_score * self.SKILL_WEIGHT)
+            + (experience_score * self.EXPERIENCE_WEIGHT)
+            + (certification_score * self.CERTIFICATION_WEIGHT)
+        )
+        overall_score = int(max(0, min(100, round(weighted_score))))
+
+        strengths = list(skill_analysis.get("strengths", []))
+        if experience_score >= 80:
+            strengths.append("Relevant experience")
+        if certification_score >= 80:
+            strengths.append("Relevant certifications")
+
+        missing_skills = list(skill_analysis.get("missing_skills", []))
+        weaknesses = list(missing_skills)
+        if experience_score < 50:
+            weaknesses.append("Experience gap")
+        if certification_score < 50:
+            weaknesses.append("Certification gap")
+
+        # Deduplicate while preserving order.
+        def _uniq(items: list[str]) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for item in items:
+                key = item.lower().strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(item)
+            return out
+
+        strengths = _uniq(strengths)
+        weaknesses = _uniq(weaknesses)
+
+        return {
+            "overall_score": overall_score,
+            "skill_scores": skill_analysis.get("skill_scores", {}),
+            "strengths": strengths,
+            "missing_skills": missing_skills,
+            "weaknesses": weaknesses,
+            "scoring_breakdown": {
+                "weights": {
+                    "skills": self.SKILL_WEIGHT,
+                    "experience": self.EXPERIENCE_WEIGHT,
+                    "certifications": self.CERTIFICATION_WEIGHT,
+                },
+                "components": {
+                    "skills": skill_score,
+                    "experience": experience_score,
+                    "certifications": certification_score,
+                },
+                "experience_details": experience_details,
+                "certification_details": certification_details,
+            },
         }
 
     # ---------------------------------------------------
@@ -220,7 +380,45 @@ Job description:
 
         self.analysis_result = self.semantic_skill_analysis(
             self.resume_text,
-            self.extracted_skills
+            self.extracted_skills,
+            self.jd_text or "",
+        )
+
+        self.analysis_result = self.comprehensive_analysis(
+            self.resume_text,
+            self.extracted_skills,
+            self.jd_text or "",
+        )
+
+        return self.analysis_result
+
+    def analyze_resume_text(self, resume_text: str, role_requirements=None, jd_text: str | None = None):
+
+        self.resume_text = (resume_text or "").strip()
+
+        if not self.resume_text:
+            return {"error": "Could not extract resume text."}
+            
+
+        jd_skills = []
+        if jd_text and jd_text.strip():
+            self.jd_text = jd_text
+            jd_skills = self.extract_skills_from_jd(jd_text)
+        else:
+            self.jd_text = ""
+
+        self.extracted_skills = self._merge_skills(role_requirements or [], jd_skills)
+
+        self.analysis_result = self.semantic_skill_analysis(
+            self.resume_text,
+            self.extracted_skills,
+            self.jd_text,
+        )
+
+        self.analysis_result = self.comprehensive_analysis(
+            self.resume_text,
+            self.extracted_skills,
+            self.jd_text,
         )
 
         return self.analysis_result
@@ -234,19 +432,17 @@ Job description:
         if not self.resume_text:
             return "Please analyze a resume first."
 
-        if not self.rag_vectorstore:
+        prompt = f"""
+Answer the question based only on this resume text.
 
-            self.rag_vectorstore = self.create_vector_store([self.resume_text])
+Resume text:
+{self.resume_text}
 
-        retriever = self.rag_vectorstore.as_retriever(search_kwargs={"k": 3})
+Question:
+{question}
+"""
 
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            retriever=retriever,
-            return_source_documents=False
-        )
-
-        return qa_chain.run(question)
+        return self.llm.invoke(prompt).content
 
     # ---------------------------------------------------
     # RESUME IMPROVEMENT

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import Any
 
 from beanie import PydanticObjectId
 from fastapi import HTTPException
@@ -27,12 +28,33 @@ def _create_access_token(data: dict) -> str:
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+def _normalize_org_id(org_ref: Any) -> str | None:
+    if org_ref is None:
+        return None
+    if isinstance(org_ref, str):
+        return org_ref
+
+    # Beanie Link stores DBRef-like metadata under `.ref.id`.
+    ref = getattr(org_ref, "ref", None)
+    ref_id = getattr(ref, "id", None)
+    if ref_id is not None:
+        return str(ref_id)
+
+    # Fallback when it is already an ObjectId-like value.
+    try:
+        return str(PydanticObjectId(org_ref))
+    except Exception:
+        return None
+
+
 async def _serialize_user(user: User) -> dict:
     """Serialize user; performs $lookup for organization if org_id present."""
     org_data = None
-    if user.organization_id:
+    organization_id = _normalize_org_id(user.organization_id)
+
+    if organization_id:
         try:
-            org = await Organization.get(PydanticObjectId(user.organization_id))
+            org = await Organization.get(PydanticObjectId(organization_id))
             if org:
                 org_data = {
                     "id": str(org.id),
@@ -50,7 +72,7 @@ async def _serialize_user(user: User) -> dict:
         "email": user.email,
         "role": user.role,
         "phone_no": user.phone_no,
-        "organization_id": user.organization_id,
+        "organization_id": organization_id,
         "organization": org_data,
         "skills": user.skills,
         "experience": user.experience,
@@ -61,6 +83,22 @@ async def _serialize_user(user: User) -> dict:
 async def register_user(data: UserRegisterSchema):
     existing = await User.find_one(User.email == data.email)
     if existing:
+        # Treat repeated register calls as idempotent when the same user
+        # submits the same credentials during testing flows.
+        if verify_password(data.password, existing.password):
+            token = _create_access_token(
+                {"sub": str(existing.id), "role": existing.role, "email": existing.email}
+            )
+            return success(
+                data={
+                    "access_token": token,
+                    "token_type": "bearer",
+                    "user": await _serialize_user(existing),
+                },
+                message="Account already exists, logged in successfully",
+                code=HTTP.OK,
+            )
+
         raise HTTPException(
             status_code=HTTP.CONFLICT,
             detail="An account with this email already exists",
