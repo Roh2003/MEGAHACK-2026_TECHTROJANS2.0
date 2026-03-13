@@ -24,11 +24,13 @@ class RoundResult(Document):
     feedback: str | None = None
     evaluated_by: str | None = None
     evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+    notification_sent_at: datetime | None = None
 
     class Settings:
         name = "round_results"
         indexes = [
             "application_id",
             "job_id",
+            "notification_sent_at",
             [("application_id", 1), ("round_id", 1)],
         ]

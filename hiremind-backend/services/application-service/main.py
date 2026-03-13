@@ -1,4 +1,5 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
 
 # Ensure upload directory exists before StaticFiles mounts it
@@ -11,12 +12,31 @@ from fastapi.staticfiles import StaticFiles
 from database import connect_db, close_db
 from routes.applications import router as applications_router
 from routes.job_application import router as job_application_router
+from services.round_email_scheduler import round_email_cron_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db()
+
+    interval_seconds = int(os.getenv("ROUND_EMAIL_CRON_INTERVAL_SECONDS", "3600"))
+    app.state.round_email_cron_task = asyncio.create_task(
+        round_email_cron_loop(interval_seconds)
+    )
+    print(
+        f"[application-service] round email cron started (interval={interval_seconds}s)"
+    )
+
     yield
+
+    cron_task = getattr(app.state, "round_email_cron_task", None)
+    if cron_task is not None:
+        cron_task.cancel()
+        try:
+            await cron_task
+        except asyncio.CancelledError:
+            pass
+
     await close_db()
 
 

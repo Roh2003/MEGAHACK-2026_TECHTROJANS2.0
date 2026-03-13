@@ -20,6 +20,8 @@ class Round(Document):
     round_order: int
     type: RoundType = RoundType.other
     max_score: float | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Settings:
