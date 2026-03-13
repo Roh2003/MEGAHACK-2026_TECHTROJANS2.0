@@ -22,7 +22,7 @@ class User(Document):
     phone_no: Optional[str] = None
 
     # HR-specific
-    organization_id: Optional[str] = None       # ref → Organization._id (stored as str)
+    organization_id: Optional[Link[Organization]] = None       # ref → Organization._id (stored as str)
 
     # Candidate-specific
     skills: Optional[List[str]] = None
