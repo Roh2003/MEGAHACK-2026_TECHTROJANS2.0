@@ -9,3 +9,4 @@ matplotlib==3.8.2
 langchain==0.2.16
 langchain-openai==0.1.25
 streamlit==1.33.0
+google-genai==1.67.0
