@@ -1,0 +1,213 @@
+HireMind Monolith API - Active Endpoints and POST Payloads
+Base URL: http://127.0.0.1:8010
+
+============================================================
+HEALTH + AI SCREENING
+============================================================
+GET /health
+GET /ai-screening/status
+POST /ai-screening/run-now
+Payload: none
+
+============================================================
+AUTH
+============================================================
+POST /auth/register
+Content-Type: application/json
+Sample payload:
+{
+  "name": "Alice HR",
+  "email": "alice.hr@example.com",
+  "password": "StrongPass123",
+  "role": "hr",
+  "phone_no": "9876543210",
+  "organization": {
+    "name": "Acme Corp",
+    "industry": "Software",
+    "size": 120,
+    "location": "Bangalore"
+  },
+  "skills": ["hiring", "screening"],
+  "experience": 4
+}
+Notes:
+- role values: hr, candidate
+- organization is required when role is hr
+
+POST /auth/login
+Content-Type: application/json
+Sample payload:
+{
+  "email": "alice.hr@example.com",
+  "password": "StrongPass123"
+}
+
+GET /auth/me
+Auth: Bearer token required
+
+============================================================
+ORGANIZATIONS
+============================================================
+POST /organizations
+Content-Type: application/json
+Sample payload:
+{
+  "name": "Acme Corp",
+  "industry": "Software",
+  "size": 120,
+  "location": "Bangalore"
+}
+
+GET /organizations
+GET /organizations/{org_id}
+
+PUT /organizations/{org_id}
+Content-Type: application/json
+Sample payload (all optional):
+{
+  "name": "Acme Updated",
+  "industry": "SaaS",
+  "size": 150,
+  "location": "Hyderabad"
+}
+
+DELETE /organizations/{org_id}
+
+============================================================
+JOBS (LEGACY)
+============================================================
+POST /jobs
+Auth: HR token required
+Content-Type: application/json
+Sample payload:
+{
+  "title": "Backend Engineer",
+  "description": "Build APIs",
+  "skills": ["python", "fastapi", "mongodb"],
+  "experience": "2-4 years",
+  "location": "Remote",
+  "ctc": "18-25 LPA",
+  "start_time": "2026-01-10T09:00:00Z",
+  "end_time": "2026-01-25T18:00:00Z"
+}
+
+GET /jobs
+GET /jobs/{job_id}
+DELETE /jobs/{job_id}
+Auth: HR token required
+
+============================================================
+JOB POSTS (PRIMARY CRUD)
+============================================================
+POST /job-posts
+Auth: HR token required
+Content-Type: application/json
+Sample payload:
+{
+  "title": "Frontend Engineer",
+  "description": "Build React UI",
+  "skills": ["react", "typescript", "tailwind"],
+  "experience": "3+ years",
+  "location": "Pune",
+  "ctc": "15-22 LPA",
+  "start_time": "2026-02-01T09:00:00Z",
+  "end_time": "2026-02-20T18:00:00Z"
+}
+
+GET /job-posts
+GET /job-posts/{job_post_id}
+
+PUT /job-posts/{job_post_id}
+Content-Type: application/json
+Sample payload (all optional):
+{
+  "title": "Frontend Engineer II",
+  "skills": ["react", "typescript", "nextjs"]
+}
+
+DELETE /job-posts/{job_post_id}
+
+============================================================
+APPLICATIONS (FILE UPLOAD FLOW)
+============================================================
+POST /apply/{job_id}
+Content-Type: multipart/form-data
+Form fields:
+- candidate_name (string)
+- email (string, email)
+- phone (string)
+- experience (string)
+- resume (file: PDF, DOC, DOCX)
+
+GET /applications/{job_id}
+
+============================================================
+JOB APPLICATIONS (STRUCTURED FLOW)
+============================================================
+POST /job-applications
+Content-Type: application/json
+Sample payload:
+{
+  "job_id": "67890abc1234",
+  "candidate_id": "cand_001",
+  "applicant_name": "John Doe",
+  "address": "Delhi",
+  "highest_qualification": "B.Tech",
+  "experience": "3 years",
+  "resume_url": "https://example.com/resume.pdf",
+  "ai_score": null,
+  "strengths": [],
+  "weaknesses": [],
+  "current_round": null,
+  "status": "applied"
+}
+Status values: applied, shortlisted, in_round, selected, rejected
+
+GET /job-applications
+GET /job-applications/{application_id}
+GET /job-applications/by-job/{job_id}
+
+PUT /job-applications/{application_id}
+Content-Type: application/json
+Payload: any optional updatable fields from create schema except job_id
+
+DELETE /job-applications/{application_id}
+
+============================================================
+ROUNDS + ROUND RESULTS
+============================================================
+POST /job-applications/rounds
+Content-Type: application/json
+Sample payload:
+{
+  "job_id": "67890abc1234",
+  "round_name": "Technical Interview",
+  "round_order": 1,
+  "type": "technical",
+  "max_score": 100
+}
+
+GET /job-applications/rounds/by-job/{job_id}
+
+POST /job-applications/round-results
+Content-Type: application/json
+Sample payload:
+{
+  "job_id": "67890abc1234",
+  "application_id": "app_001",
+  "candidate_id": "cand_001",
+  "round_id": "round_001",
+  "score": 82,
+  "status": "passed",
+  "feedback": "Good problem solving",
+  "evaluated_by": "Interviewer A"
+}
+Round result status values are based on RoundResultStatus enum in codebase.
+
+GET /job-applications/{application_id}/round-history
+
+============================================================
+DISTRIBUTION
+============================================================
+POST /distribute-job/{job_id}
+Payload: none
