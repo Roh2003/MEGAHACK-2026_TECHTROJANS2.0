@@ -14,20 +14,16 @@ from google.genai import types
 MODULE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = MODULE_DIR.parent
 
-# User-requested free-tier model names.
-GEMINI_FLASH = "gemini-1.5-flash"
-GEMINI_PRO_1_5 = "gemini-1.5-pro"
-GEMINI_PRO = "gemini-pro"
+# Supported free-tier Gemini text models exposed by the current API.
+GEMINI_FLASH = "models/gemini-2.5-flash"
+GEMINI_FLASH_LITE = "models/gemini-2.0-flash-lite"
+GEMINI_FLASH_LATEST = "models/gemini-flash-latest"
 
-# Fallback aliases exposed by current Gemini API endpoints.
+# Only free-tier Gemini fallbacks are used here.
 MODEL_FALLBACK_ORDER = [
     GEMINI_FLASH,
-    GEMINI_PRO_1_5,
-    GEMINI_PRO,
-    "models/gemini-flash-latest",
-    "models/gemini-pro-latest",
-    "models/gemini-2.0-flash-lite",
-    "models/gemini-2.0-flash",
+    GEMINI_FLASH_LITE,
+    GEMINI_FLASH_LATEST,
 ]
 
 DEFAULT_GEMINI_MODEL = GEMINI_FLASH

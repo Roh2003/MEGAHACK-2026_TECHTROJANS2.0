@@ -71,3 +71,36 @@ class JobPostResponseSchema(BaseModel):
     end_time: str               # ISO-8601 string
     created_by: str
     created_at: str             # ISO-8601 string
+
+
+class RejectedCandidateMatchResponseSchema(BaseModel):
+    id: str
+    job_id: str
+    source_application_id: str
+    source_job_id: str
+    candidate_id: str | None = None
+    applicant_name: str
+    address: str
+    highest_qualification: str
+    experience: str
+    resume_url: str
+    previous_ai_score: float | None = None
+    matched_ai_score: float
+    strengths: List[str]
+    weaknesses: List[str]
+    source_status: str
+    submit_at: str | None = None
+    matched_at: str
+    updated_at: str
+
+
+class JobRejectedCandidateRematchSummarySchema(BaseModel):
+    enabled: bool
+    scanned_rejected_applications: int
+    matched_candidates: int
+    top_candidate: RejectedCandidateMatchResponseSchema | None = None
+    top_candidates: List[RejectedCandidateMatchResponseSchema] = []
+
+
+class JobPostCreateWithMatchesResponseSchema(JobPostResponseSchema):
+    rejected_candidate_rematch: JobRejectedCandidateRematchSummarySchema

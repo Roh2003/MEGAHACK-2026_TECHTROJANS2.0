@@ -1,10 +1,57 @@
-# AI Recruitment Platform — Backend Microservices
+# AI Recruitment Platform — Backend (Monolith Mode)
 
-A production-ready AI-powered recruitment backend built with **FastAPI** and **MongoDB** following **clean microservices architecture**.
+A production-ready AI-powered recruitment backend built with **FastAPI** and **MongoDB**.
+
+The project now supports a **single-server monolith runtime** that loads all existing service domains in one process.
 
 ---
 
-## Architecture Overview
+## Runtime Modes
+
+### Monolith (Recommended)
+
+Run all domains on a single server and single port:
+
+```bash
+uvicorn monolith_main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Monolith URLs:
+
+- Swagger: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
+- Auth APIs: `http://localhost:8000/auth/*`
+- Job APIs: `http://localhost:8000/jobs/*`
+- Distribution APIs: `http://localhost:8000/distribute-job/*`
+- Application APIs: `http://localhost:8000/apply/*`, `http://localhost:8000/job-applications/*`
+
+### AI Screening Cron (Monolith)
+
+The monolith now includes an automated AI screening worker that:
+
+1. Checks expired job posts (`end_time <= now`).
+2. Fetches related job applications with missing `ai_score`.
+3. Parses resume text from `resume_url` (pdf/txt/docx).
+4. Evaluates candidate fit using resume text + job description + job skills.
+5. Writes `ai_score`, `strengths`, `weaknesses` back to `job_applications`.
+
+Required environment variable:
+
+- `OPENAI_API_KEY`: enables AI screening worker.
+
+Optional environment variables:
+
+- `AI_CRON_INTERVAL_SECONDS` (default `300`)
+- `AI_CUTOFF_SCORE` (default `75`)
+
+Control endpoints:
+
+- `GET /ai-screening/status`
+- `POST /ai-screening/run-now`
+
+### Legacy Microservices
+
+If needed, you can still run services independently:
 
 | Service              | Port | Responsibility                                     |
 |----------------------|------|----------------------------------------------------|
@@ -88,7 +135,13 @@ pip install -r requirements.txt
 
 Each service has its own `.env` file. Update them with your values — especially `JWT_SECRET` (use the **same secret across services** that need to verify tokens).
 
-### 3. Start All Services
+### 3. Start Monolith Server (Single Port)
+
+```bash
+uvicorn monolith_main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 4. (Optional) Start All Services Separately
 
 Open **4 separate terminals**, one per service:
 

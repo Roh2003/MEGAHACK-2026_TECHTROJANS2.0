@@ -1,5 +1,7 @@
 from beanie import PydanticObjectId
-from fastapi import APIRouter, HTTPException, status
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Path, status
 
 from models.assessment_question_response import AssessmentQuestionResponse
 from models.assessment_questions import AssessmentQuestions
@@ -21,7 +23,12 @@ from schemas.assessment_questions import (
     AssessmentQuestionsResponseSchema,
 )
 from schemas.round import RoundCreateSchema, RoundResponseSchema
-from schemas.round_result import RoundResultCreateSchema, RoundResultResponseSchema
+from schemas.round_result import (
+    RoundCandidateDecisionSchema,
+    RoundResultCreateSchema,
+    RoundResultResponseSchema,
+    RoundWiseCandidateSchema,
+)
 
 router = APIRouter(prefix="/job-applications", tags=["Job Applications"])
 
@@ -131,6 +138,159 @@ async def _get_or_404(application_id: str) -> JobApplication:
     return doc
 
 
+async def _get_round_or_404(round_id: str) -> Round:
+    try:
+        round_obj_id = PydanticObjectId(round_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid round_id format",
+        )
+
+    round_doc = await Round.get(round_obj_id)
+    if not round_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Round '{round_id}' not found",
+        )
+
+    return round_doc
+
+
+async def _upsert_round_result_and_progress(
+    *,
+    job_id: str,
+    application_id: str,
+    candidate_id: str,
+    round_id: str,
+    status_value: RoundResultStatus,
+    score: float | None = None,
+    feedback: str | None = None,
+    evaluated_by: str | None = None,
+) -> RoundResult:
+    application = await _get_or_404(application_id)
+    if application.job_id != job_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="application_id does not belong to provided job_id",
+        )
+    if application.candidate_id != candidate_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="candidate_id does not belong to provided application_id",
+        )
+
+    round_doc = await _get_round_or_404(round_id)
+    if round_doc.job_id != job_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="round_id does not belong to provided job_id",
+        )
+
+    if score is not None and round_doc.max_score is not None and score > round_doc.max_score:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"score cannot exceed max_score ({round_doc.max_score})",
+        )
+
+    existing = await RoundResult.find_one(
+        RoundResult.application_id == application_id,
+        RoundResult.round_id == round_id,
+    )
+
+    if existing:
+        existing.job_id = job_id
+        existing.candidate_id = candidate_id
+        existing.score = score
+        existing.status = status_value
+        existing.feedback = feedback
+        existing.evaluated_by = evaluated_by
+        existing.evaluated_at = datetime.utcnow()
+        await existing.save()
+        result_doc = existing
+    else:
+        result_doc = RoundResult(
+            job_id=job_id,
+            application_id=application_id,
+            candidate_id=candidate_id,
+            round_id=round_id,
+            score=score,
+            status=status_value,
+            feedback=feedback,
+            evaluated_by=evaluated_by,
+        )
+        await result_doc.insert()
+
+    if status_value in {RoundResultStatus.failed, RoundResultStatus.rejected}:
+        application.status = ApplicationStatus.rejected
+        application.current_round = round_doc.round_order
+    elif status_value == RoundResultStatus.passed:
+        next_round = (
+            await Round.find(
+                Round.job_id == job_id,
+                Round.round_order > round_doc.round_order,
+            )
+            .sort(Round.round_order)
+            .first_or_none()
+        )
+        if next_round:
+            application.status = ApplicationStatus.in_round
+            application.current_round = next_round.round_order
+        else:
+            application.status = ApplicationStatus.selected
+            application.current_round = round_doc.round_order
+    else:
+        application.status = ApplicationStatus.in_round
+        application.current_round = round_doc.round_order
+
+    await application.save()
+    return result_doc
+
+
+async def _round_wise_candidates(
+    job_id: str,
+    round_id: str,
+    statuses: set[RoundResultStatus],
+) -> list[dict]:
+    if not statuses:
+        return []
+
+    status_filters = [RoundResult.status == s for s in statuses]
+    status_clause = status_filters[0]
+    for expression in status_filters[1:]:
+        status_clause = status_clause | expression
+
+    docs = (
+        await RoundResult.find(
+            RoundResult.job_id == job_id,
+            RoundResult.round_id == round_id,
+            status_clause,
+        )
+        .sort(RoundResult.evaluated_at)
+        .to_list()
+    )
+
+    output: list[dict] = []
+    for doc in docs:
+        app = await _get_or_404(doc.application_id)
+        output.append(
+            {
+                "round_result_id": str(doc.id),
+                "job_id": doc.job_id,
+                "round_id": doc.round_id,
+                "application_id": doc.application_id,
+                "candidate_id": doc.candidate_id,
+                "candidate_name": app.applicant_name,
+                "score": doc.score,
+                "status": doc.status,
+                "feedback": doc.feedback,
+                "evaluated_by": doc.evaluated_by,
+                "evaluated_at": doc.evaluated_at.isoformat(),
+            }
+        )
+    return output
+
+
 # ── CREATE ────────────────────────────────────────────────────────────────────
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=JobApplicationResponseSchema)
@@ -166,7 +326,9 @@ async def get_all_job_applications():
 # ── READ BY ID ────────────────────────────────────────────────────────────────
 
 @router.get("/{application_id}", response_model=JobApplicationResponseSchema)
-async def get_job_application(application_id: str):
+async def get_job_application(
+    application_id: str = Path(..., pattern=r"^[a-fA-F0-9]{24}$")
+):
     """Retrieve a single job application by its MongoDB _id (j_d_id)."""
     doc = await _get_or_404(application_id)
     return _serialize(doc)
@@ -231,7 +393,7 @@ async def create_or_update_assessment_questions(payload: AssessmentQuestionsCrea
 
     if existing:
         existing.questionans = [item.model_dump() for item in payload.questionans]
-        existing.updated_at = existing.created_at.utcnow()
+        existing.updated_at = datetime.utcnow()
         await existing.save()
         return _serialize_assessment_questions(existing)
 
@@ -279,7 +441,7 @@ async def create_or_update_assessment_question_response(
     if existing:
         existing.totalmarks = payload.totalmarks
         existing.questionanswer = [item.model_dump() for item in payload.questionanswer]
-        existing.updated_at = existing.submitted_at.utcnow()
+        existing.updated_at = datetime.utcnow()
         await existing.save()
         return _serialize_assessment_question_response(existing)
 
@@ -320,75 +482,79 @@ async def get_assessment_question_response(job_id: str, round_id: str, candidate
 )
 async def create_round_result(payload: RoundResultCreateSchema):
     """Store candidate evaluation for a round and progress application status."""
-    application = await _get_or_404(payload.application_id)
-    if application.job_id != payload.job_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="application_id does not belong to provided job_id",
-        )
-
-    try:
-        round_obj_id = PydanticObjectId(payload.round_id)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid round_id format",
-        )
-
-    round_doc = await Round.get(round_obj_id)
-    if not round_doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Round '{payload.round_id}' not found",
-        )
-    if round_doc.job_id != payload.job_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="round_id does not belong to provided job_id",
-        )
-
-    if payload.score is not None and round_doc.max_score is not None and payload.score > round_doc.max_score:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"score cannot exceed max_score ({round_doc.max_score})",
-        )
-
-    doc = RoundResult(
+    doc = await _upsert_round_result_and_progress(
         job_id=payload.job_id,
         application_id=payload.application_id,
         candidate_id=payload.candidate_id,
         round_id=payload.round_id,
+        status_value=payload.status,
         score=payload.score,
-        status=payload.status,
         feedback=payload.feedback,
         evaluated_by=payload.evaluated_by,
     )
-    await doc.insert()
-
-    if payload.status in {RoundResultStatus.failed, RoundResultStatus.rejected}:
-        application.status = ApplicationStatus.rejected
-        application.current_round = round_doc.round_order
-    elif payload.status == RoundResultStatus.passed:
-        next_round = (
-            await Round.find(
-                Round.job_id == payload.job_id,
-                Round.round_order > round_doc.round_order,
-            )
-            .sort(Round.round_order)
-            .first_or_none()
-        )
-        if next_round:
-            application.status = ApplicationStatus.in_round
-            application.current_round = next_round.round_order
-        else:
-            application.status = ApplicationStatus.selected
-            application.current_round = round_doc.round_order
-    else:
-        application.status = ApplicationStatus.in_round
-        application.current_round = round_doc.round_order
-
-    await application.save()
     return _serialize_round_result(doc)
+
+
+@router.post(
+    "/round-results/select-candidate",
+    status_code=status.HTTP_200_OK,
+    response_model=RoundResultResponseSchema,
+)
+async def select_candidate_for_round(payload: RoundCandidateDecisionSchema):
+    doc = await _upsert_round_result_and_progress(
+        job_id=payload.job_id,
+        application_id=payload.application_id,
+        candidate_id=payload.candidate_id,
+        round_id=payload.round_id,
+        status_value=RoundResultStatus.passed,
+        score=payload.score,
+        feedback=payload.feedback,
+        evaluated_by=payload.evaluated_by,
+    )
+    return _serialize_round_result(doc)
+
+
+@router.post(
+    "/round-results/reject-candidate",
+    status_code=status.HTTP_200_OK,
+    response_model=RoundResultResponseSchema,
+)
+async def reject_candidate_for_round(payload: RoundCandidateDecisionSchema):
+    doc = await _upsert_round_result_and_progress(
+        job_id=payload.job_id,
+        application_id=payload.application_id,
+        candidate_id=payload.candidate_id,
+        round_id=payload.round_id,
+        status_value=RoundResultStatus.rejected,
+        score=payload.score,
+        feedback=payload.feedback,
+        evaluated_by=payload.evaluated_by,
+    )
+    return _serialize_round_result(doc)
+
+
+@router.get(
+    "/round-results/selected-candidates/by-job/{job_id}/round/{round_id}",
+    response_model=list[RoundWiseCandidateSchema],
+)
+async def round_wise_selected_candidates(job_id: str, round_id: str):
+    return await _round_wise_candidates(
+        job_id=job_id,
+        round_id=round_id,
+        statuses={RoundResultStatus.passed},
+    )
+
+
+@router.get(
+    "/round-results/rejected-candidates/by-job/{job_id}/round/{round_id}",
+    response_model=list[RoundWiseCandidateSchema],
+)
+async def round_wise_rejected_candidates(job_id: str, round_id: str):
+    return await _round_wise_candidates(
+        job_id=job_id,
+        round_id=round_id,
+        statuses={RoundResultStatus.rejected, RoundResultStatus.failed},
+    )
 
 
 @router.get(
@@ -409,7 +575,10 @@ async def get_round_history(application_id: str):
 # ── UPDATE ────────────────────────────────────────────────────────────────────
 
 @router.put("/{application_id}", response_model=JobApplicationResponseSchema)
-async def update_job_application(application_id: str, payload: JobApplicationUpdateSchema):
+async def update_job_application(
+    application_id: str = Path(..., pattern=r"^[a-fA-F0-9]{24}$"),
+    payload: JobApplicationUpdateSchema = ...,
+):
     """Partially update a job application. Useful for changing status or correcting details."""
     doc = await _get_or_404(application_id)
 
@@ -430,7 +599,9 @@ async def update_job_application(application_id: str, payload: JobApplicationUpd
 # ── DELETE ────────────────────────────────────────────────────────────────────
 
 @router.delete("/{application_id}", status_code=status.HTTP_200_OK)
-async def delete_job_application(application_id: str):
+async def delete_job_application(
+    application_id: str = Path(..., pattern=r"^[a-fA-F0-9]{24}$")
+):
     """Permanently delete a job application from MongoDB."""
     doc = await _get_or_404(application_id)
     await doc.delete()

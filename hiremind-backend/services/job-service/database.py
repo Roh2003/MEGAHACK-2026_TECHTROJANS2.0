@@ -4,6 +4,7 @@ from beanie import init_beanie
 from dotenv import load_dotenv
 
 from models.job_post import JobPost
+from models.rejected_candidate_match import RejectedCandidateMatch
 
 load_dotenv()
 
@@ -16,7 +17,10 @@ _client: AsyncIOMotorClient = None
 async def connect_db() -> None:
     global _client
     _client = AsyncIOMotorClient(MONGO_URI)
-    await init_beanie(database=_client[DATABASE_NAME], document_models=[JobPost])
+    await init_beanie(
+        database=_client[DATABASE_NAME],
+        document_models=[JobPost, RejectedCandidateMatch],
+    )
     print(f"[job-service] Connected to MongoDB — db: {DATABASE_NAME}")
 
 

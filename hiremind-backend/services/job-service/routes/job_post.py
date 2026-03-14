@@ -4,9 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from models.job_post import JobPost
 from schemas.job_post import (
     JobPostCreateSchema,
+    JobPostCreateWithMatchesResponseSchema,
+    RejectedCandidateMatchResponseSchema,
     JobPostUpdateSchema,
     JobPostResponseSchema,
 )
+from services.job_service import create_job, get_rejected_candidate_matches
 from shared.dependencies import require_hr
 
 router = APIRouter(prefix="/job-posts", tags=["Job Posts"])
@@ -49,25 +52,13 @@ async def _get_or_404(job_post_id: str) -> JobPost:
 
 # ── CREATE ────────────────────────────────────────────────────────────────────
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=JobPostResponseSchema)
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=JobPostCreateWithMatchesResponseSchema)
 async def create_job_post(
     payload: JobPostCreateSchema,
     current_user: dict = Depends(require_hr),
 ):
-    """Create a new job post and persist it to MongoDB."""
-    doc = JobPost(
-        title=payload.title,
-        description=payload.description,
-        skills=payload.skills,
-        experience=payload.experience,
-        location=payload.location,
-        ctc=payload.ctc,
-        start_time=payload.start_time,
-        end_time=payload.end_time,
-        created_by=current_user["sub"],
-    )
-    await doc.insert()
-    return _serialize(doc)
+    """Create a new job post and automatically rematch rejected candidates."""
+    return await create_job(payload, current_user["sub"])
 
 
 # ── READ ALL ──────────────────────────────────────────────────────────────────
@@ -86,6 +77,14 @@ async def get_job_post(job_post_id: str):
     """Retrieve a single job post by its MongoDB _id."""
     doc = await _get_or_404(job_post_id)
     return _serialize(doc)
+
+
+@router.get(
+    "/{job_post_id}/rejected-candidate-matches",
+    response_model=list[RejectedCandidateMatchResponseSchema],
+)
+async def get_job_post_rejected_candidate_matches(job_post_id: str):
+    return await get_rejected_candidate_matches(job_post_id)
 
 
 # ── UPDATE ────────────────────────────────────────────────────────────────────
