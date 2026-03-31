@@ -26,19 +26,19 @@ async def list_all_jobs():
     return await get_all_jobs()
 
 
-@router.get("/jobs/{job_id}")
-async def get_single_job(job_id: str):
-    return await get_job_by_id(job_id)
+@router.get("/jobs/{jobid}")
+async def get_single_job(jobid: str):
+    return await get_job_by_id(jobid)
 
 
-@router.get("/jobs/{job_id}/rejected-candidate-matches", response_model=list[RejectedCandidateMatchResponseSchema])
-async def get_job_rejected_candidate_matches(job_id: str):
-    return await get_rejected_candidate_matches(job_id)
+@router.get("/jobs/{jobid}/rejected-candidate-matches", response_model=list[RejectedCandidateMatchResponseSchema])
+async def get_job_rejected_candidate_matches(jobid: str):
+    return await get_rejected_candidate_matches(jobid)
 
 
-@router.delete("/jobs/{job_id}", status_code=status.HTTP_200_OK)
+@router.delete("/jobs/{jobid}", status_code=status.HTTP_200_OK)
 async def remove_job(
-    job_id: str,
+    jobid: str,
     current_user: dict = Depends(require_hr),
 ):
-    return await delete_job(job_id, current_user["sub"])
+    return await delete_job(jobid, current_user["sub"])

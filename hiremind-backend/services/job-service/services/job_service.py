@@ -3,10 +3,10 @@ import asyncio
 import os
 from pathlib import Path
 
-from beanie import PydanticObjectId
 from fastapi import HTTPException, status
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 
 from AI_Model.agent import ResumeAnalysisAgent
 from AI_Model.resume_parser import ResumeParser
@@ -16,8 +16,11 @@ from schemas.job_post import JobPostCreateSchema
 
 
 def _serialize_job(job: JobPost) -> dict:
+    jobid = job.jobid or str(job.id)
     return {
         "id": str(job.id),
+        "jobid": jobid,
+        "organization_id": job.organization_id,
         "title": job.title,
         "description": job.description,
         "skills": job.skills,
@@ -71,6 +74,57 @@ def _build_job_matching_context(job: JobPost) -> str:
             f"CTC: {job.ctc}",
         ]
     )
+
+
+async def _organization_exists(organization_id: str | None) -> bool:
+    if not organization_id:
+        return True
+
+    mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+    database_name = os.getenv("DATABASE_NAME", "ai_recruitment")
+    client = AsyncIOMotorClient(mongo_uri)
+    try:
+        org_doc = await client[database_name]["organizations"].find_one({"organization_id": organization_id})
+        if org_doc is not None:
+            return True
+
+        legacy_doc = await client[database_name]["organizations"].find_one(
+            {"$expr": {"$eq": [{"$toString": "$_id"}, organization_id]}}
+        )
+        return legacy_doc is not None
+    finally:
+        client.close()
+
+
+async def _generate_next_jobid() -> str:
+    docs = await JobPost.find_all().to_list()
+    next_suffix = 100
+    for doc in docs:
+        value = (doc.jobid or "").strip().upper()
+        if not value.startswith("JOB"):
+            continue
+        suffix = value[3:]
+        if suffix.isdigit():
+            next_suffix = max(next_suffix, int(suffix) + 1)
+    return f"JOB{next_suffix}"
+
+
+async def backfill_missing_jobids() -> int:
+    docs = await JobPost.find(JobPost.jobid == None).sort(JobPost.created_at).to_list()
+    if not docs:
+        return 0
+
+    next_jobid = await _generate_next_jobid()
+    next_suffix = int(next_jobid[3:])
+    updated = 0
+
+    for doc in docs:
+        doc.jobid = f"JOB{next_suffix}"
+        await doc.save()
+        next_suffix += 1
+        updated += 1
+
+    return updated
 
 
 def _resolve_openai_api_key() -> str:
@@ -127,7 +181,7 @@ async def _rematch_rejected_candidates_for_job(job: JobPost) -> dict:
     parser = ResumeParser(base_dir=ROOT_DIR)
     agent = ResumeAnalysisAgent(api_key=api_key)
     job_context = _build_job_matching_context(job)
-    job_id = str(job.id)
+    job_id = job.jobid or str(job.id)
     now = datetime.utcnow()
 
     matched_docs: list[RejectedCandidateMatch] = []
@@ -201,13 +255,20 @@ async def _rematch_rejected_candidates_for_job(job: JobPost) -> dict:
 
 
 async def _get_or_404(job_id: str) -> JobPost:
+    job = await JobPost.find_one(JobPost.jobid == job_id)
+    if job:
+        return job
+
     try:
+        from beanie import PydanticObjectId
+
         obj_id = PydanticObjectId(job_id)
     except Exception:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid job ID format",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
         )
+
     job = await JobPost.get(obj_id)
     if not job:
         raise HTTPException(
@@ -218,18 +279,33 @@ async def _get_or_404(job_id: str) -> JobPost:
 
 
 async def create_job(data: JobPostCreateSchema, created_by: str) -> dict:
-    job = JobPost(
-        title=data.title,
-        description=data.description,
-        skills=data.skills,
-        experience=data.experience,
-        location=data.location,
-        ctc=data.ctc,
-        start_time=data.start_time,
-        end_time=data.end_time,
-        created_by=created_by,
-    )
-    await job.insert()
+    if not await _organization_exists(data.organization_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="organization_id not found",
+        )
+
+    while True:
+        jobid = await _generate_next_jobid()
+        job = JobPost(
+            jobid=jobid,
+            organization_id=data.organization_id,
+            title=data.title,
+            description=data.description,
+            skills=data.skills,
+            experience=data.experience,
+            location=data.location,
+            ctc=data.ctc,
+            start_time=data.start_time,
+            end_time=data.end_time,
+            created_by=created_by,
+        )
+        try:
+            await job.insert()
+            break
+        except DuplicateKeyError:
+            continue
+
     rematch_summary = await _rematch_rejected_candidates_for_job(job)
     return {
         **_serialize_job(job),
@@ -265,4 +341,4 @@ async def delete_job(job_id: str, user_id: str) -> dict:
             detail="You are not authorized to delete this job",
         )
     await job.delete()
-    return {"message": "Job deleted successfully", "job_id": job_id}
+    return {"message": "Job deleted successfully", "jobid": job_id}

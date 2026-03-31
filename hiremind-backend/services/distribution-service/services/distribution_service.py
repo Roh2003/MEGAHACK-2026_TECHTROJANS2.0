@@ -11,17 +11,17 @@ BASE_JOB_URL: str = os.getenv("BASE_JOB_URL", "http://localhost:8002")
 _SHARE_MESSAGE = "Exciting job opportunity! Apply now."
 
 
-async def distribute_job(job_id: str) -> dict:
+async def distribute_job(jobid: str) -> dict:
     """
     Build social media share links for a given job ID.
 
-    The job URL is constructed from BASE_JOB_URL and job_id.
+    The job URL is constructed from BASE_JOB_URL and jobid.
     No external HTTP calls are made; links are generated locally.
     """
-    job_url = f"{BASE_JOB_URL}/jobs/{job_id}"
+    job_url = f"{BASE_JOB_URL}/jobs/{jobid}"
 
     return {
-        "job_id": job_id,
+        "jobid": jobid,
         "job_url": job_url,
         "share_links": {
             "linkedin": generate_linkedin_share_link(job_url),

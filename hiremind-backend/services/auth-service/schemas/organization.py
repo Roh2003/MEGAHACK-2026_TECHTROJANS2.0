@@ -25,6 +25,7 @@ class OrganizationUpdateSchema(BaseModel):
 
 class OrganizationResponseSchema(BaseModel):
     id: str
+    organization_id: str
     name: str
     industry: str
     size: Optional[int]

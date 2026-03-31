@@ -1,5 +1,6 @@
 from beanie import PydanticObjectId
 from fastapi import APIRouter, HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from models.organization import Organization
 from schemas.organization import (
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/organizations", tags=["Organizations"])
 def _serialize(org: Organization) -> dict:
     return {
         "id": str(org.id),
+        "organization_id": org.organization_id or str(org.id),
         "name": org.name,
         "industry": org.industry,
         "size": org.size,
@@ -26,7 +28,41 @@ def _serialize(org: Organization) -> dict:
     }
 
 
+def _generate_next_organization_id(organizations: list[Organization]) -> str:
+    next_suffix = 101
+    for org in organizations:
+        value = (org.organization_id or "").strip()
+        if not value.startswith("Org"):
+            continue
+        suffix = value[3:]
+        if suffix.isdigit():
+            next_suffix = max(next_suffix, int(suffix) + 1)
+    return f"Org{next_suffix}"
+
+
+async def backfill_missing_organization_ids() -> int:
+    docs = await Organization.find(Organization.organization_id == None).sort(Organization.created_at).to_list()
+    if not docs:
+        return 0
+
+    existing_docs = await Organization.find_all().sort(Organization.created_at).to_list()
+    next_suffix = int(_generate_next_organization_id(existing_docs)[3:])
+    updated = 0
+
+    for doc in docs:
+        doc.organization_id = f"Org{next_suffix}"
+        await doc.save()
+        next_suffix += 1
+        updated += 1
+
+    return updated
+
+
 async def _get_or_404(org_id: str) -> Organization:
+    org = await Organization.find_one(Organization.organization_id == org_id)
+    if org:
+        return org
+
     try:
         obj_id = PydanticObjectId(org_id)
     except Exception:
@@ -48,13 +84,19 @@ async def _get_or_404(org_id: str) -> Organization:
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_organization(payload: OrganizationCreateSchema):
     """Create a new organization."""
-    org = Organization(
-        name=payload.name,
-        industry=payload.industry,
-        size=payload.size,
-        location=payload.location,
-    )
-    await org.insert()
+    while True:
+        org = Organization(
+            organization_id=_generate_next_organization_id(await Organization.find_all().to_list()),
+            name=payload.name,
+            industry=payload.industry,
+            size=payload.size,
+            location=payload.location,
+        )
+        try:
+            await org.insert()
+            break
+        except DuplicateKeyError:
+            continue
     return success(data=_serialize(org), message="Organization created successfully", code=HTTP.CREATED)
 
 
@@ -101,4 +143,4 @@ async def delete_organization(org_id: str):
     """Delete an organization by ID."""
     org = await _get_or_404(org_id)
     await org.delete()
-    return success(data={"id": org_id}, message="Organization deleted successfully")
+    return success(data={"organization_id": org.organization_id or org_id}, message="Organization deleted successfully")

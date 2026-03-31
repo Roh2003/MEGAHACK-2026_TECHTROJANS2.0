@@ -20,6 +20,7 @@ router = APIRouter(prefix="/job-posts", tags=["Job Posts"])
 def _serialize(doc: JobPost) -> dict:
     return {
         "id": str(doc.id),
+        "organization_id": doc.organization_id,
         "title": doc.title,
         "description": doc.description,
         "skills": doc.skills,
@@ -33,19 +34,24 @@ def _serialize(doc: JobPost) -> dict:
     }
 
 
-async def _get_or_404(job_post_id: str) -> JobPost:
+async def _get_or_404(jobid: str) -> JobPost:
+    doc = await JobPost.find_one(JobPost.jobid == jobid)
+    if doc:
+        return doc
+
     try:
-        obj_id = PydanticObjectId(job_post_id)
+        obj_id = PydanticObjectId(jobid)
     except Exception:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid job post ID format",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job post not found",
         )
+
     doc = await JobPost.get(obj_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job post '{job_post_id}' not found",
+            detail=f"Job post '{jobid}' not found",
         )
     return doc
 
@@ -72,27 +78,27 @@ async def get_all_job_posts():
 
 # ── READ BY ID ────────────────────────────────────────────────────────────────
 
-@router.get("/{job_post_id}", response_model=JobPostResponseSchema)
-async def get_job_post(job_post_id: str):
-    """Retrieve a single job post by its MongoDB _id."""
-    doc = await _get_or_404(job_post_id)
+@router.get("/{jobid}", response_model=JobPostResponseSchema)
+async def get_job_post(jobid: str):
+    """Retrieve a single job post by its public jobid."""
+    doc = await _get_or_404(jobid)
     return _serialize(doc)
 
 
 @router.get(
-    "/{job_post_id}/rejected-candidate-matches",
+    "/{jobid}/rejected-candidate-matches",
     response_model=list[RejectedCandidateMatchResponseSchema],
 )
-async def get_job_post_rejected_candidate_matches(job_post_id: str):
-    return await get_rejected_candidate_matches(job_post_id)
+async def get_job_post_rejected_candidate_matches(jobid: str):
+    return await get_rejected_candidate_matches(jobid)
 
 
 # ── UPDATE ────────────────────────────────────────────────────────────────────
 
-@router.put("/{job_post_id}", response_model=JobPostResponseSchema)
-async def update_job_post(job_post_id: str, payload: JobPostUpdateSchema):
+@router.put("/{jobid}", response_model=JobPostResponseSchema)
+async def update_job_post(jobid: str, payload: JobPostUpdateSchema):
     """Partially update a job post. Only the provided fields are changed."""
-    doc = await _get_or_404(job_post_id)
+    doc = await _get_or_404(jobid)
 
     update_data = payload.model_dump(exclude_none=True)
     if not update_data:
@@ -100,6 +106,15 @@ async def update_job_post(job_post_id: str, payload: JobPostUpdateSchema):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No update fields provided",
         )
+
+    if "organization_id" in update_data:
+        from services.job_service import _organization_exists
+
+        if not await _organization_exists(update_data["organization_id"]):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="organization_id not found",
+            )
 
     for field, value in update_data.items():
         setattr(doc, field, value)
@@ -110,9 +125,9 @@ async def update_job_post(job_post_id: str, payload: JobPostUpdateSchema):
 
 # ── DELETE ────────────────────────────────────────────────────────────────────
 
-@router.delete("/{job_post_id}", status_code=status.HTTP_200_OK)
-async def delete_job_post(job_post_id: str):
+@router.delete("/{jobid}", status_code=status.HTTP_200_OK)
+async def delete_job_post(jobid: str):
     """Permanently delete a job post from MongoDB."""
-    doc = await _get_or_404(job_post_id)
+    doc = await _get_or_404(jobid)
     await doc.delete()
-    return {"message": "Job post deleted successfully", "id": job_post_id}
+    return {"message": "Job post deleted successfully", "jobid": jobid}

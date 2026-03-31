@@ -47,6 +47,21 @@ def _normalize_org_id(org_ref: Any) -> str | None:
         return None
 
 
+async def _generate_next_organization_id() -> str:
+    organizations = await Organization.find_all().to_list()
+    next_suffix = 101
+
+    for org in organizations:
+        value = (org.organization_id or "").strip()
+        if not value.startswith("Org"):
+            continue
+        suffix = value[3:]
+        if suffix.isdigit():
+            next_suffix = max(next_suffix, int(suffix) + 1)
+
+    return f"Org{next_suffix}"
+
+
 async def _serialize_user(user: User) -> dict:
     """Serialize user; performs $lookup for organization if org_id present."""
     org_data = None
@@ -54,10 +69,13 @@ async def _serialize_user(user: User) -> dict:
 
     if organization_id:
         try:
-            org = await Organization.get(PydanticObjectId(organization_id))
+            org = await Organization.find_one(Organization.organization_id == organization_id)
+            if org is None:
+                org = await Organization.get(PydanticObjectId(organization_id))
             if org:
                 org_data = {
                     "id": str(org.id),
+                    "organization_id": org.organization_id or str(org.id),
                     "name": org.name,
                     "industry": org.industry,
                     "size": org.size,
@@ -107,7 +125,9 @@ async def register_user(data: UserRegisterSchema):
     # ── Step 1: Create Organization first (HR only) ───────────────────────────
     organization_id: str | None = None
     if data.role.value == "hr" and data.organization:
+        public_organization_id = await _generate_next_organization_id()
         org = Organization(
+            organization_id=public_organization_id,
             name=data.organization.name,
             industry=data.organization.industry,
             size=data.organization.size,
@@ -141,11 +161,18 @@ async def register_user(data: UserRegisterSchema):
 
 
 async def login_user(data: UserLoginSchema):
+    print(f"Attempting login for email: {data.email}")
     user = await User.find_one(User.email == data.email)
-    if not user or not verify_password(data.password, user.password):
+    print(f"User found: {user}")
+    if not user:
         raise HTTPException(
-            status_code=HTTP.UNAUTHORIZED,
-            detail="Invalid email or password",
+            status_code=HTTP.BAD_REQUEST,
+            detail="User Not Found",
+        )
+    if not verify_password(data.password, user.password):
+        raise HTTPException(
+            status_code=HTTP.BAD_REQUEST,
+            detail="Incorrect Password",
         )
 
     token = _create_access_token(

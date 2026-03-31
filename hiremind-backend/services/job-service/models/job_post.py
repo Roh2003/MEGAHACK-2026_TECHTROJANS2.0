@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from beanie import Document
 from pydantic import Field
+from pymongo import IndexModel
 
 
 class JobPost(Document):
@@ -12,6 +13,8 @@ class JobPost(Document):
     Collection: job_posts
     """
 
+    jobid: str | None = Field(default=None)
+    organization_id: str | None = Field(default=None)
     title: str
     description: str
     skills: List[str]
@@ -25,3 +28,7 @@ class JobPost(Document):
 
     class Settings:
         name = "job_posts"                 # MongoDB collection name
+        indexes = [
+            IndexModel([("jobid", 1)], unique=True, sparse=True),
+            IndexModel([("organization_id", 1)], sparse=True),
+        ]

@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from models.job_post import JobPost
 from models.rejected_candidate_match import RejectedCandidateMatch
+from services.job_service import backfill_missing_jobids
 
 load_dotenv()
 
@@ -21,6 +22,9 @@ async def connect_db() -> None:
         database=_client[DATABASE_NAME],
         document_models=[JobPost, RejectedCandidateMatch],
     )
+    backfilled = await backfill_missing_jobids()
+    if backfilled:
+        print(f"[job-service] Backfilled {backfilled} legacy job records with public jobid values")
     print(f"[job-service] Connected to MongoDB — db: {DATABASE_NAME}")
 
 

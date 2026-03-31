@@ -1,7 +1,22 @@
 from datetime import datetime
+import re
 from typing import List, Optional
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+
+
+def _normalize_optional_organization_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    if not re.fullmatch(r"Org\d+", cleaned):
+        raise ValueError("organization_id must look like Org101")
+
+    return cleaned
 
 
 class JobPostCreateSchema(BaseModel):
@@ -13,6 +28,10 @@ class JobPostCreateSchema(BaseModel):
     experience: str
     location: str
     ctc: str
+    organization_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("organization_id", "orgnization_id"),
+    )
     start_time: datetime
     end_time: datetime
 
@@ -31,6 +50,11 @@ class JobPostCreateSchema(BaseModel):
             raise ValueError("At least one skill is required")
         return cleaned
 
+    @field_validator("organization_id")
+    @classmethod
+    def organization_id_valid(cls, v: str | None) -> str | None:
+        return _normalize_optional_organization_id(v)
+
     @model_validator(mode="after")
     def end_after_start(self) -> "JobPostCreateSchema":
         if self.end_time <= self.start_time:
@@ -47,6 +71,10 @@ class JobPostUpdateSchema(BaseModel):
     experience: Optional[str] = None
     location: Optional[str] = None
     ctc: Optional[str] = None
+    organization_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("organization_id", "orgnization_id"),
+    )
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
@@ -56,11 +84,18 @@ class JobPostUpdateSchema(BaseModel):
             raise ValueError("end_time must be after start_time")
         return self
 
+    @field_validator("organization_id")
+    @classmethod
+    def organization_id_valid(cls, v: str | None) -> str | None:
+        return _normalize_optional_organization_id(v)
+
 
 class JobPostResponseSchema(BaseModel):
     """Response body returned after creating or fetching a job post."""
 
     id: str
+    jobid: str
+    organization_id: str | None = None
     title: str
     description: str
     skills: List[str]

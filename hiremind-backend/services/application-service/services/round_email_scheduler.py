@@ -21,16 +21,20 @@ async def _get_user_doc(candidate_id: str) -> dict | None:
     return await users.find_one({"$expr": {"$eq": [{"$toString": "$_id"}, candidate_id]}})
 
 
-async def _get_job_title(job_id: str) -> str:
+async def _get_job_title(jobid: str) -> str:
     db = get_db()
 
-    query = {"$expr": {"$eq": [{"$toString": "$_id"}, job_id]}}
-
-    job_doc = await db["job_posts"].find_one(query)
+    job_doc = await db["job_posts"].find_one({"jobid": jobid})
+    if not job_doc:
+        legacy_query = {"$expr": {"$eq": [{"$toString": "$_id"}, jobid]}}
+        job_doc = await db["job_posts"].find_one(legacy_query)
     if job_doc and job_doc.get("title"):
         return str(job_doc["title"])
 
-    fallback_job_doc = await db["jobs"].find_one(query)
+    fallback_job_doc = await db["jobs"].find_one({"jobid": jobid})
+    if not fallback_job_doc:
+        legacy_query = {"$expr": {"$eq": [{"$toString": "$_id"}, jobid]}}
+        fallback_job_doc = await db["jobs"].find_one(legacy_query)
     if fallback_job_doc and fallback_job_doc.get("title"):
         return str(fallback_job_doc["title"])
 

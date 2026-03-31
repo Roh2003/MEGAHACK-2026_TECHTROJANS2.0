@@ -336,11 +336,11 @@ async def get_job_application(
 
 # ── READ BY JOB ID ────────────────────────────────────────────────────────────
 
-@router.get("/by-job/{job_id}", response_model=list[JobApplicationResponseSchema])
-async def get_applications_by_job(job_id: str):
+@router.get("/by-job/{jobid}", response_model=list[JobApplicationResponseSchema])
+async def get_applications_by_job(jobid: str):
     """Retrieve all applications submitted for a specific job post."""
     docs = (
-        await JobApplication.find(JobApplication.job_id == job_id)
+        await JobApplication.find(JobApplication.job_id == jobid)
         .sort(-JobApplication.submit_at)
         .to_list()
     )
@@ -373,10 +373,10 @@ async def create_round(payload: RoundCreateSchema):
     return _serialize_round(doc)
 
 
-@router.get("/rounds/by-job/{job_id}", response_model=list[RoundResponseSchema])
-async def get_rounds_by_job(job_id: str):
+@router.get("/rounds/by-job/{jobid}", response_model=list[RoundResponseSchema])
+async def get_rounds_by_job(jobid: str):
     """List configured rounds for a job in pipeline order."""
-    docs = await Round.find(Round.job_id == job_id).sort(Round.round_order).to_list()
+    docs = await Round.find(Round.job_id == jobid).sort(Round.round_order).to_list()
     return [_serialize_round(d) for d in docs]
 
 
@@ -407,18 +407,18 @@ async def create_or_update_assessment_questions(payload: AssessmentQuestionsCrea
 
 
 @router.get(
-    "/assessment-questions/by-job/{job_id}/round/{round_id}",
+    "/assessment-questions/by-job/{jobid}/round/{round_id}",
     response_model=AssessmentQuestionsResponseSchema,
 )
-async def get_assessment_questions(job_id: str, round_id: str):
+async def get_assessment_questions(jobid: str, round_id: str):
     doc = await AssessmentQuestions.find_one(
-        AssessmentQuestions.job_id == job_id,
+        AssessmentQuestions.job_id == jobid,
         AssessmentQuestions.round_id == round_id,
     )
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Assessment questions not found for provided job_id and round_id",
+            detail="Assessment questions not found for provided jobid and round_id",
         )
 
     return _serialize_assessment_questions(doc)
@@ -457,19 +457,19 @@ async def create_or_update_assessment_question_response(
 
 
 @router.get(
-    "/assessment-question-responses/by-job/{job_id}/round/{round_id}/candidate/{candidate_id}",
+    "/assessment-question-responses/by-job/{jobid}/round/{round_id}/candidate/{candidate_id}",
     response_model=AssessmentQuestionResponseSchema,
 )
-async def get_assessment_question_response(job_id: str, round_id: str, candidate_id: str):
+async def get_assessment_question_response(jobid: str, round_id: str, candidate_id: str):
     doc = await AssessmentQuestionResponse.find_one(
-        AssessmentQuestionResponse.job_id == job_id,
+        AssessmentQuestionResponse.job_id == jobid,
         AssessmentQuestionResponse.round_id == round_id,
         AssessmentQuestionResponse.candidate_id == candidate_id,
     )
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Assessment response not found for provided job_id, round_id and candidate_id",
+            detail="Assessment response not found for provided jobid, round_id and candidate_id",
         )
 
     return _serialize_assessment_question_response(doc)
@@ -534,24 +534,24 @@ async def reject_candidate_for_round(payload: RoundCandidateDecisionSchema):
 
 
 @router.get(
-    "/round-results/selected-candidates/by-job/{job_id}/round/{round_id}",
+    "/round-results/selected-candidates/by-job/{jobid}/round/{round_id}",
     response_model=list[RoundWiseCandidateSchema],
 )
-async def round_wise_selected_candidates(job_id: str, round_id: str):
+async def round_wise_selected_candidates(jobid: str, round_id: str):
     return await _round_wise_candidates(
-        job_id=job_id,
+        job_id=jobid,
         round_id=round_id,
         statuses={RoundResultStatus.passed},
     )
 
 
 @router.get(
-    "/round-results/rejected-candidates/by-job/{job_id}/round/{round_id}",
+    "/round-results/rejected-candidates/by-job/{jobid}/round/{round_id}",
     response_model=list[RoundWiseCandidateSchema],
 )
-async def round_wise_rejected_candidates(job_id: str, round_id: str):
+async def round_wise_rejected_candidates(jobid: str, round_id: str):
     return await _round_wise_candidates(
-        job_id=job_id,
+        job_id=jobid,
         round_id=round_id,
         statuses={RoundResultStatus.rejected, RoundResultStatus.failed},
     )
