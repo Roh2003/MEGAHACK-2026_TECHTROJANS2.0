@@ -24,7 +24,7 @@ class ScreeningPipeline:
         self,
         mongo_uri: str,
         database_name: str,
-        openai_api_key: str,
+        openrouter_api_key: str,
         base_dir: str | Path,
         cutoff_score: int = 75,
     ) -> None:
@@ -40,7 +40,7 @@ class ScreeningPipeline:
         self.job_applications = self.db["job_applications"]
 
         self.parser = ResumeParser(base_dir=base_dir)
-        self.agent = ResumeAnalysisAgent(api_key=openai_api_key, cutoff_score=cutoff_score)
+        self.agent = ResumeAnalysisAgent(api_key=openrouter_api_key, cutoff_score=cutoff_score)
         self._log(
             f"Step 0: Pipeline initialized (db={self.database_name}, cutoff={self.cutoff_score})"
         )
@@ -68,7 +68,7 @@ class ScreeningPipeline:
         }
 
         for job in expired_jobs:
-            job_id = str(job.get("_id"))
+            job_id = str(job.get("jobid") or job.get("_id"))
             job_description = (job.get("description") or "").strip()
             job_skills = job.get("skills") or []
             self._log(f"Step 3: Processing job={job_id} title={job.get('title')}")
@@ -185,8 +185,9 @@ class ScreeningPipeline:
             )
 
             next_status = application.get("status")
-            if isinstance(score, (int, float)) and next_status in ("applied", "shortlisted"):
-                next_status = "shortlisted" if score >= self.cutoff_score else "rejected"
+            # Temporary: disable automatic rejection based on the screening cutoff.
+            # if isinstance(score, (int, float)) and next_status in ("applied", "shortlisted"):
+            #     next_status = "shortlisted" if score >= self.cutoff_score else "rejected"
 
             self._log(
                 f"Step 8: Saving application={app_id} status={next_status} ai_score={score}"
@@ -239,15 +240,15 @@ def build_pipeline_from_env(base_dir: str | Path) -> ScreeningPipeline | None:
 
     # Accept common variants to avoid env naming mistakes during local setup.
     api_key = (
-        os.getenv("OPENAI_API_KEY")
-        or os.getenv("openai_api_key")
-        or os.getenv("OPENAPI_API_KEY")
-        or os.getenv("openapi_api_key")
+        os.getenv("OPENROUTER_API_KEY")
+        or os.getenv("openrouter_api_key")
+        or os.getenv("OPENROUTER_KEY")
+        or os.getenv("openrouter_key")
         or ""
     ).strip()
 
     if not api_key:
-        print("[ai-screening] OPENAI API key not found in environment", flush=True)
+        print("[ai-screening] OPENROUTER API key not found in environment", flush=True)
         return None
 
     cutoff_score = int(os.getenv("AI_CUTOFF_SCORE", "75"))
@@ -255,7 +256,7 @@ def build_pipeline_from_env(base_dir: str | Path) -> ScreeningPipeline | None:
     return ScreeningPipeline(
         mongo_uri=mongo_uri,
         database_name=database_name,
-        openai_api_key=api_key,
+        openrouter_api_key=api_key,
         base_dir=base_dir,
         cutoff_score=cutoff_score,
     )

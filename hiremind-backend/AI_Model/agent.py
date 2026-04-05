@@ -1,16 +1,55 @@
-import re
-import io
-import tempfile
-import PyPDF2
-import ast
-from concurrent.futures import ThreadPoolExecutor
-from typing import Iterable
+from __future__ import annotations
 
-from langchain_openai import ChatOpenAI
+import ast
+import io
+import json
+import os
+import re
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Iterable
+
+import PyPDF2
+import requests
+
+
+STATIC_FREE_MODELS = [
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "qwen/qwen3.6-plus:free",
+    "liquid/lfm-2.5-1.2b-thinking:free", #10 sec
+    "google/gemma-3-4b-it:free",
+    "stepfun/step-3.5-flash:free",
+    "minimax/minimax-m2.5:free" #26 sed
+]
+
+DEFAULT_OPENROUTER_MODEL = STATIC_FREE_MODELS[8]
+
+
+def _unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def _to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item.get("text") or ""))
+        return "".join(parts).strip()
+
+    return ""
 
 
 class ResumeAnalysisAgent:
-
     SKILL_WEIGHT = 0.60
     EXPERIENCE_WEIGHT = 0.25
     CERTIFICATION_WEIGHT = 0.15
@@ -32,33 +71,88 @@ class ResumeAnalysisAgent:
         "itil",
     ]
 
-    def __init__(self, api_key: str, cutoff_score: int = 75):
+    def __init__(self, api_key: str | None = None, model: str | None = None, cutoff_score: int = 75):
+        self.api_key = (
+            api_key
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("openrouter_api_key")
+            or os.getenv("OPENROUTER_KEY")
+            or os.getenv("openrouter_key")
+        )
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY is not set in the environment.")
 
-        self.api_key = api_key
         self.cutoff_score = cutoff_score
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        self.model_name = model or os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
+        self.http_referer = os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost")
+        self.app_title = os.getenv("OPENROUTER_APP_TITLE", "HireMind")
 
         self.resume_text = None
         self.jd_text = None
 
-        self.extracted_skills = []
-        self.analysis_result = None
+        self.extracted_skills: list[str] = []
+        self.analysis_result: dict[str, Any] | None = None
 
-        self.resume_strengths = []
-        self.resume_weaknesses = []
+        self.resume_strengths: list[str] = []
+        self.resume_weaknesses: list[str] = []
 
         self.improved_resume_path = None
 
-        self.llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            openai_api_key=self.api_key
+    def _chat_completion(self, messages: list[dict[str, Any]], prompt_label: str = "") -> str:
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": self.http_referer,
+                "X-Title": self.app_title,
+            },
+            json={
+                "model": self.model_name,
+                "messages": messages,
+                "stream": False,
+            },
+            timeout=60,
         )
+        response.raise_for_status()
+        payload = response.json()
+        choice = (payload.get("choices") or [{}])[0]
+        text = _to_text(choice.get("message", {}).get("content"))
+        if not text:
+            raise ValueError("Empty response from model")
+        return text
 
-    # ---------------------------------------------------
-    # TEXT EXTRACTION
-    # ---------------------------------------------------
+    @staticmethod
+    def _clean_response_text(response_text: str) -> str:
+        cleaned = (response_text or "").strip()
+
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+
+        return cleaned.strip()
+
+    @classmethod
+    def _parse_response_json(cls, response_text: str) -> dict[str, Any]:
+        cleaned = cls._clean_response_text(response_text)
+
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start_index = cleaned.find("{")
+            end_index = cleaned.rfind("}")
+            if start_index == -1 or end_index == -1 or end_index <= start_index:
+                raise ValueError("Model returned a non-JSON response.")
+
+            parsed = json.loads(cleaned[start_index : end_index + 1])
+
+        if not isinstance(parsed, dict):
+            raise ValueError("Model response JSON must be an object.")
+
+        return parsed
 
     def extract_text_from_pdf(self, pdf_file):
-
         text = ""
 
         if hasattr(pdf_file, "getvalue"):
@@ -73,12 +167,11 @@ class ResumeAnalysisAgent:
         return text
 
     def extract_text_from_txt(self, txt_file):
-
         if hasattr(txt_file, "getvalue"):
             return txt_file.getvalue().decode("utf-8")
 
-        with open(txt_file, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(txt_file, "r", encoding="utf-8") as file_handle:
+            return file_handle.read()
 
     def extract_text_from_file(self, file):
         filename = getattr(file, "name", "") or ""
@@ -105,43 +198,35 @@ class ResumeAnalysisAgent:
                     merged.append(normalized)
         return merged
 
-    # ---------------------------------------------------
-    # SKILL ANALYSIS
-    # ---------------------------------------------------
-
     def analyze_skill(self, resume_text, skill, jd_text=""):
-
         query = f"""
-Analyze the resume and rate the candidate proficiency in {skill}.
+            Analyze the resume and rate the candidate proficiency in {skill}.
 
-Job description context:
-{jd_text}
+            Job description context:
+            {jd_text}
 
-Resume text:
-{resume_text}
+            Resume text:
+            {resume_text}
 
-Return format:
-Score: number between 0-10
-Reason: short explanation
-"""
+            Return format:
+            Score: number between 0-10
+            Reason: short explanation
+            """
 
-        response = self.llm.invoke(query).content
+        response = self._chat_completion(
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant. Keep answers concise and clear."},
+                {"role": "user", "content": query},
+            ],
+            prompt_label=f"skill-analysis:{skill}",
+        )
 
         match = re.search(r"\b(10|[0-9])\b", response)
         score = int(match.group(1)) if match else 0
 
-        return {
-            "skill": skill,
-            "score": score,
-            "reason": response
-        }
-
-    # ---------------------------------------------------
-    # SEMANTIC SKILL ANALYSIS
-    # ---------------------------------------------------
+        return {"skill": skill, "score": score, "reason": response}
 
     def semantic_skill_analysis(self, resume_text, skills, jd_text=""):
-
         skill_scores = {}
         missing_skills = []
         strengths = []
@@ -149,18 +234,13 @@ Reason: short explanation
         total_score = 0
 
         with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(lambda s: self.analyze_skill(resume_text, s, jd_text), skills))
 
-            results = list(
-                executor.map(lambda s: self.analyze_skill(resume_text, s, jd_text), skills)
-            )
-
-        for res in results:
-
-            skill = res["skill"]
-            score = res["score"]
+        for result in results:
+            skill = result["skill"]
+            score = result["score"]
 
             skill_scores[skill] = score
-
             total_score += score
 
             if score <= 5:
@@ -178,8 +258,126 @@ Reason: short explanation
             "overall_score": overall_score,
             "skill_scores": skill_scores,
             "strengths": strengths,
-            "missing_skills": missing_skills
+            "missing_skills": missing_skills,
         }
+
+    def _build_resume_screening_prompt(self, resume_text: str, skills: list[str], jd_text: str = "") -> str:
+        skills_json = json.dumps(skills or [], ensure_ascii=True, indent=2)
+        jd_block = jd_text.strip() if jd_text else ""
+
+        return f"""
+Analyze this resume against these skills: {skills_json}
+
+Job description:
+{jd_block or "No job description provided."}
+
+Resume text:
+{resume_text}
+
+Return JSON only with this structure:
+{{
+  "overall_score": 0,
+  "skill_scores": {{
+    "skill name": 0
+  }},
+  "strengths": ["..."],
+  "weaknesses": ["..."],
+  "missing_skills": ["..."],
+  "summary": "short screening summary"
+}}
+
+Rules:
+1. Return valid JSON only.
+2. Use the provided skills and job description to judge the resume.
+3. Keep scores between 0 and 100.
+4. skill_scores should include the provided skills when possible.
+5. If a skill is not found, assign it a low score and include it in missing_skills.
+""".strip()
+
+    def _screen_resume_once(self, resume_text: str, skills: list[str], jd_text: str = "") -> dict[str, Any]:
+        prompt = self._build_resume_screening_prompt(resume_text, skills, jd_text)
+        response_text = self._chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a resume screening assistant. "
+                        "Always return valid JSON and do not include markdown."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            prompt_label="resume-screening",
+        )
+
+        parsed = self._parse_response_json(response_text)
+        skill_scores = self._normalize_skill_scores(parsed.get("skill_scores"), skills)
+        strengths = self._normalize_string_list(parsed.get("strengths"))
+        weaknesses = self._normalize_string_list(parsed.get("weaknesses"))
+        missing_skills = self._normalize_string_list(parsed.get("missing_skills"))
+
+        if not missing_skills and weaknesses:
+            missing_skills = list(weaknesses)
+        if not weaknesses and missing_skills:
+            weaknesses = list(missing_skills)
+
+        overall_score = self._normalize_score(parsed.get("overall_score"))
+
+        normalized = {
+            "overall_score": overall_score,
+            "ai_score": overall_score,
+            "skill_scores": skill_scores,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "missing_skills": missing_skills,
+            "summary": str(parsed.get("summary") or "").strip(),
+        }
+
+        self.resume_strengths = list(normalized["strengths"])
+        self.resume_weaknesses = list(normalized["missing_skills"] or normalized["weaknesses"])
+        return normalized
+
+    @staticmethod
+    def _normalize_score(value: Any) -> int:
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = 0.0
+        return int(max(0, min(100, round(numeric))))
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = str(item or "").strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                cleaned.append(text)
+        return cleaned
+
+    def _normalize_skill_scores(self, value: Any, skills: list[str]) -> dict[str, int]:
+        output: dict[str, int] = {}
+
+        if isinstance(value, dict):
+            for raw_key, raw_score in value.items():
+                key = str(raw_key or "").strip()
+                if not key:
+                    continue
+                output[key] = self._normalize_score(raw_score)
+
+        for skill in skills or []:
+            key = str(skill or "").strip()
+            if key and key not in output:
+                output[key] = 0
+
+        return output
 
     @staticmethod
     def _extract_year_values(text: str) -> list[float]:
@@ -189,11 +387,9 @@ Reason: short explanation
         values: list[float] = []
         normalized = text.lower()
 
-        # Matches: 3 years, 2.5 yrs, 4+ years
         for match in re.finditer(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", normalized):
             values.append(float(match.group(1)))
 
-        # Matches ranges: 2-4 years (takes midpoint)
         for match in re.finditer(
             r"(\d+(?:\.\d+)?)\s*[-to]{1,3}\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)",
             normalized,
@@ -212,7 +408,6 @@ Reason: short explanation
         candidate_years = max(candidate_values) if candidate_values else 0.0
 
         if required_years <= 0:
-            # No explicit requirement in JD; assign neutral-high if candidate mentions experience.
             score = 75 if candidate_years > 0 else 55
         elif candidate_years <= 0:
             score = 20
@@ -251,7 +446,6 @@ Reason: short explanation
         if jd_set:
             score = int((len(overlap) / len(jd_set)) * 100)
         else:
-            # JD does not demand certs; reward cert presence lightly.
             score = 70 if resume_set else 60
 
         details = {
@@ -288,7 +482,6 @@ Reason: short explanation
         if certification_score < 50:
             weaknesses.append("Certification gap")
 
-        # Deduplicate while preserving order.
         def _uniq(items: list[str]) -> list[str]:
             seen: set[str] = set()
             out: list[str] = []
@@ -324,12 +517,7 @@ Reason: short explanation
             },
         }
 
-    # ---------------------------------------------------
-    # SKILL EXTRACTION FROM JD
-    # ---------------------------------------------------
-
     def extract_skills_from_jd(self, jd_text):
-
         prompt = f"""
 Extract the main technical skills from this job description.
 
@@ -339,96 +527,76 @@ Job description:
 {jd_text}
 """
 
-        response = self.llm.invoke(prompt)
-
-        text = response.content.strip()
+        text = self._chat_completion(
+            messages=[
+                {"role": "system", "content": "You extract skills from job descriptions."},
+                {"role": "user", "content": prompt},
+            ],
+            prompt_label="extract-skills-from-jd",
+        ).strip()
 
         try:
             skills = ast.literal_eval(text)
-
             if isinstance(skills, list):
                 return skills
-
-        except:
+        except Exception:
             pass
 
-        return [s.strip() for s in text.split(",") if s.strip()]
-
-    # ---------------------------------------------------
-    # RESUME ANALYSIS
-    # ---------------------------------------------------
+        return [skill.strip() for skill in text.split(",") if skill.strip()]
 
     def analyze_resume(self, resume_file, role_requirements=None, custom_jd=None):
-
         self.resume_text = self.extract_text_from_file(resume_file)
 
         if not self.resume_text:
             return {"error": "Could not extract resume text."}
 
         if custom_jd:
-
             self.jd_text = self.extract_text_from_file(custom_jd)
-
-            self.extracted_skills = self.extract_skills_from_jd(self.jd_text)
-
-        elif role_requirements:
-
-            self.extracted_skills = role_requirements
-
         else:
-            self.extracted_skills = []
+            self.jd_text = ""
 
-        self.analysis_result = self.semantic_skill_analysis(
-            self.resume_text,
-            self.extracted_skills,
-            self.jd_text or "",
-        )
+        self.extracted_skills = self._merge_skills(role_requirements or [])
 
-        self.analysis_result = self.comprehensive_analysis(
-            self.resume_text,
-            self.extracted_skills,
-            self.jd_text or "",
-        )
+        try:
+            self.analysis_result = self._screen_resume_once(
+                self.resume_text,
+                self.extracted_skills,
+                self.jd_text or "",
+            )
+        except Exception:
+            self.analysis_result = self.comprehensive_analysis(
+                self.resume_text,
+                self.extracted_skills,
+                self.jd_text or "",
+            )
 
         return self.analysis_result
 
     def analyze_resume_text(self, resume_text: str, role_requirements=None, jd_text: str | None = None):
-
         self.resume_text = (resume_text or "").strip()
 
         if not self.resume_text:
             return {"error": "Could not extract resume text."}
-            
 
-        jd_skills = []
-        if jd_text and jd_text.strip():
-            self.jd_text = jd_text
-            jd_skills = self.extract_skills_from_jd(jd_text)
-        else:
-            self.jd_text = ""
+        self.jd_text = (jd_text or "").strip()
+        self.extracted_skills = self._merge_skills(role_requirements or [])
 
-        self.extracted_skills = self._merge_skills(role_requirements or [], jd_skills)
-
-        self.analysis_result = self.semantic_skill_analysis(
-            self.resume_text,
-            self.extracted_skills,
-            self.jd_text,
-        )
-
-        self.analysis_result = self.comprehensive_analysis(
-            self.resume_text,
-            self.extracted_skills,
-            self.jd_text,
-        )
+        try:
+            self.analysis_result = self._screen_resume_once(
+                self.resume_text,
+                self.extracted_skills,
+                self.jd_text,
+            )
+        except Exception:
+            self.analysis_result = self.comprehensive_analysis(
+                self.resume_text,
+                self.extracted_skills,
+                self.jd_text,
+            )
 
         return self.analysis_result
 
-    # ---------------------------------------------------
-    # CHAT WITH RESUME
-    # ---------------------------------------------------
-
     def ask_question(self, question):
-
         if not self.resume_text:
             return "Please analyze a resume first."
 
@@ -442,14 +610,15 @@ Question:
 {question}
 """
 
-        return self.llm.invoke(prompt).content
-
-    # ---------------------------------------------------
-    # RESUME IMPROVEMENT
-    # ---------------------------------------------------
+        return self._chat_completion(
+            messages=[
+                {"role": "system", "content": "Answer based only on the provided resume text."},
+                {"role": "user", "content": prompt},
+            ],
+            prompt_label="ask-question",
+        )
 
     def get_improved_resume(self, highlight_skills=""):
-
         if not self.resume_text:
             return "Analyze resume first."
 
@@ -464,19 +633,16 @@ Resume:
 Return the improved resume text.
 """
 
-        response = self.llm.invoke(prompt)
+        improved_resume = self._chat_completion(
+            messages=[
+                {"role": "system", "content": "Improve resumes while preserving facts from the source."},
+                {"role": "user", "content": prompt},
+            ],
+            prompt_label="improved-resume",
+        )
 
-        improved_resume = response.content
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".txt",
-            mode="w",
-            encoding="utf-8"
-        ) as f:
-
-            f.write(improved_resume)
-
-            self.improved_resume_path = f.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8") as file_handle:
+            file_handle.write(improved_resume)
+            self.improved_resume_path = file_handle.name
 
         return improved_resume

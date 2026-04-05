@@ -4,6 +4,18 @@ from typing import List
 from pydantic import BaseModel, field_validator
 
 
+class AssessmentInviteRequestSchema(BaseModel):
+    job_id: str
+    round_id: str
+
+    @field_validator("job_id", "round_id")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Field must not be empty")
+        return v.strip()
+
+
 class ScheduleAssessmentCreateSchema(BaseModel):
     job_id: str
     round_id: str
@@ -46,3 +58,15 @@ class ScheduleAssessmentResponseSchema(BaseModel):
     start_time: str
     end_time: str
     created_at: str
+
+
+class AssessmentInviteResponseSchema(BaseModel):
+    assessment_id: str
+    job_id: str
+    round_id: str
+    round_name: str
+    assessment_link: str
+    assignment_count: int
+    emailed_count: int
+    skipped_count: int
+    candidate_ids: list[str]

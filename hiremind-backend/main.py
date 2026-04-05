@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from tasks.ai_tasks import ai_screen_resume
 
 from AI_Model.generatesQuestionFromai import generate_gemini_agent_response
 # from AI_Model.screening_pipeline import build_pipeline_from_env
@@ -193,7 +194,7 @@ _loaded_services.extend(
             app,
             service_key="application",
             service_dir=SERVICES_DIR / "application-service",
-            route_modules=("routes.applications", "routes.job_application"),
+            route_modules=("routes.job_application",),
             database_module="database",
             mount_uploads=True,
         ),
@@ -211,6 +212,11 @@ async def health_check():
         "domains": ["auth", "job", "application", "distribution"],
     }
 
+
+@app.get("/test-queue")
+def test_queue():
+    ai_screen_resume.delay("test-application-id")
+    return {"message": "Task sent to queue"}
 
 # @app.get("/ai-screening/status", tags=["AI Screening"])
 # async def ai_screening_status():
@@ -250,7 +256,6 @@ async def distribute_job_to_platforms(jobid: str):
 class AIInterviewQuestionRequest(BaseModel):
     job_description: dict[str, Any]
     questions_per_level: int = Field(default=5, ge=1)
-    model: str | None = None
 
 
 @app.post("/ai-interview/questions", tags=["AI Interview"])
@@ -261,7 +266,6 @@ async def generate_ai_interview_questions(payload: AIInterviewQuestionRequest):
         result = generate_gemini_agent_response(
             job_description=payload.job_description,
             questions_per_level=effective_questions_per_level,
-            model=payload.model or "gemini-1.5-flash",
         )
     except Exception as exc:
         return {

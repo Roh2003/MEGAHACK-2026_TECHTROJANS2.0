@@ -13,11 +13,18 @@ class ApplicationStatus(str, Enum):
     rejected = "rejected"
 
 
+class PipelineSnapshotRoundSchema(BaseModel):
+    round_id: str
+    name: str
+    order: int
+
+
 class JobApplicationCreateSchema(BaseModel):
     """Request body for submitting a job application (non-file fields)."""
 
     job_id: str
     candidate_id: Optional[str] = None
+    email: Optional[str] = None
     applicant_name: str
     address: str
     highest_qualification: str
@@ -26,7 +33,6 @@ class JobApplicationCreateSchema(BaseModel):
     ai_score: Optional[float] = None
     strengths: Optional[list[str]] = None
     weaknesses: Optional[list[str]] = None
-    current_round: Optional[int] = None
     status: ApplicationStatus = ApplicationStatus.applied
 
     @field_validator(
@@ -44,6 +50,7 @@ class JobApplicationUpdateSchema(BaseModel):
     """Request body for partially updating a job application (all fields optional)."""
 
     candidate_id: Optional[str] = None
+    email: Optional[str] = None
     applicant_name: Optional[str] = None
     address: Optional[str] = None
     highest_qualification: Optional[str] = None
@@ -52,7 +59,6 @@ class JobApplicationUpdateSchema(BaseModel):
     ai_score: Optional[float] = None
     strengths: Optional[list[str]] = None
     weaknesses: Optional[list[str]] = None
-    current_round: Optional[int] = None
     status: Optional[ApplicationStatus] = None
 
 
@@ -62,6 +68,7 @@ class JobApplicationResponseSchema(BaseModel):
     id: str                         # serialised MongoDB _id  (j_d_id)
     job_id: str
     candidate_id: Optional[str] = None
+    email: Optional[str] = None
     applicant_name: str
     address: str
     highest_qualification: str
@@ -70,6 +77,7 @@ class JobApplicationResponseSchema(BaseModel):
     ai_score: Optional[float] = None
     strengths: list[str]
     weaknesses: list[str]
+    pipeline_snapshot: list[PipelineSnapshotRoundSchema]
     current_round: Optional[int] = None
     submit_at: str                  # ISO-8601 string
     status: ApplicationStatus

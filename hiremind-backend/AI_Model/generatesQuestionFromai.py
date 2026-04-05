@@ -6,44 +6,71 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+import requests
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 
 MODULE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = MODULE_DIR.parent
 
-# Supported free-tier Gemini text models exposed by the current API.
-GEMINI_FLASH = "models/gemini-2.5-flash"
-GEMINI_FLASH_LITE = "models/gemini-2.0-flash-lite"
-GEMINI_FLASH_LATEST = "models/gemini-flash-latest"
-
-# Only free-tier Gemini fallbacks are used here.
-MODEL_FALLBACK_ORDER = [
-    GEMINI_FLASH,
-    GEMINI_FLASH_LITE,
-    GEMINI_FLASH_LATEST,
+STATIC_FREE_MODELS = [
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "deepseek/deepseek-r1:free",
+    "qwen/qwen3.6-plus:free",
+    "liquid/lfm-2.5-1.2b-thinking:free", #10 sec
+    "google/gemma-3-4b-it:free",
+    "stepfun/step-3.5-flash:free",
+    "minimax/minimax-m2.5:free" #sed
 ]
 
-DEFAULT_GEMINI_MODEL = GEMINI_FLASH
+DEFAULT_OPENROUTER_MODEL = STATIC_FREE_MODELS[5]
 
 
 load_dotenv(PROJECT_DIR / ".env", override=False)
 load_dotenv(MODULE_DIR / ".env", override=False)
 
 
-class GeminiInterviewQuestionAgent:
-    """Generate structured interview questions from a job description using Gemini."""
+def _unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
 
-    def __init__(self, api_key: str | None = None, model: str = DEFAULT_GEMINI_MODEL) -> None:
-        resolved_api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("gemini_api_key")
+
+def _to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item.get("text") or ""))
+        return "".join(parts).strip()
+
+    return ""
+
+
+class OpenRouterInterviewQuestionAgent:
+    """Generate structured interview questions from a job description using OpenRouter."""
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        resolved_api_key = (
+            api_key
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("openrouter_api_key")
+            or os.getenv("OPENROUTER_KEY")
+            or os.getenv("openrouter_key")
+        )
         if not resolved_api_key:
-            raise ValueError("GEMINI_API_KEY is not set in the environment.")
+            raise ValueError("OPENROUTER_API_KEY is not set in the environment.")
 
         self.api_key = resolved_api_key
-        self.model_name = model
-        self.client = genai.Client(api_key=self.api_key)
+        self.model_name = model or DEFAULT_OPENROUTER_MODEL
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        self.http_referer = os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost")
+        self.app_title = os.getenv("OPENROUTER_APP_TITLE", "HireMind")
 
     @staticmethod
     def _normalize_job_description(job_description: Mapping[str, Any]) -> dict[str, Any]:
@@ -78,7 +105,7 @@ class GeminiInterviewQuestionAgent:
                 continue
 
             if isinstance(value, Mapping):
-                nested = GeminiInterviewQuestionAgent._normalize_job_description(value)
+                nested = OpenRouterInterviewQuestionAgent._normalize_job_description(value)
                 if nested:
                     normalized[key] = nested
                 continue
@@ -90,13 +117,9 @@ class GeminiInterviewQuestionAgent:
 
         return normalized
 
-    def build_prompt(
-        self,
-        job_description: Mapping[str, Any],
-        questions_per_level: int = 5,
-    ) -> str:
+    def build_prompt(self, job_description: Mapping[str, Any], questions_per_level: int = 10) -> str:
         normalized_job_description = self._normalize_job_description(job_description)
-        safe_questions_per_level = max(5, questions_per_level)
+        safe_questions_per_level = max(10, questions_per_level)
         job_payload = json.dumps(normalized_job_description, indent=2, ensure_ascii=True)
 
         return f"""
@@ -116,7 +139,7 @@ Instructions:
 5. Do not invent company-specific facts, certifications, technologies, or domain constraints that are not supported by the job description.
 6. If information is missing, stay conservative and rely only on the provided fields.
 7. Make the questions useful for a real interviewer and suitable for evaluating the candidate from screening round to deep technical round.
-8. Return exactly {safe_questions_per_level} questions for each level: easy, medium, and hard.
+8. Return exactly {safe_questions_per_level} questions total, mixed across easy, medium, and hard levels.
 9. Order the questions from easiest to hardest.
 
 Return valid JSON only. Do not wrap the JSON in markdown.
@@ -125,7 +148,7 @@ Required JSON schema:
 {{
   "job_summary": "short summary of the role based on the provided job description",
   "interview_strategy": "brief explanation of how the questions align with the role",
-  "questions": [
+    "questions": [
     {{
       "level": "easy | medium | hard",
       "category": "technical | behavioral | scenario | problem-solving | leadership | communication",
@@ -158,81 +181,69 @@ Required JSON schema:
             start_index = cleaned.find("{")
             end_index = cleaned.rfind("}")
             if start_index == -1 or end_index == -1 or end_index <= start_index:
-                raise ValueError("Gemini returned a non-JSON response.")
+                raise ValueError("OpenRouter returned a non-JSON response.")
 
             parsed = json.loads(cleaned[start_index : end_index + 1])
 
         if not isinstance(parsed, dict):
-            raise ValueError("Gemini response JSON must be an object.")
+            raise ValueError("OpenRouter response JSON must be an object.")
 
         return parsed
 
-    def generate_questions_response(
-        self,
-        job_description: Mapping[str, Any],
-        questions_per_level: int = 5,
-    ) -> dict[str, Any]:
+    def _chat_completion(self, messages: list[dict[str, Any]], prompt_label: str = "") -> str:
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": self.http_referer,
+                "X-Title": self.app_title,
+            },
+            json={
+                "model": self.model_name,
+                "messages": messages,
+                "stream": False,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        choice = (payload.get("choices") or [{}])[0]
+        text = _to_text(choice.get("message", {}).get("content"))
+        if not text:
+            raise ValueError("Empty response from model")
+        return text
+
+    def generate_questions_response(self, job_description: Mapping[str, Any], questions_per_level: int = 10) -> dict[str, Any]:
         prompt = self.build_prompt(job_description, questions_per_level=questions_per_level)
 
-        candidates: list[str] = []
-        for model_name in [self.model_name, *MODEL_FALLBACK_ORDER]:
-            if model_name and model_name not in candidates:
-                candidates.append(model_name)
+        response_text = self._chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You generate structured interview questions and always return valid JSON.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            prompt_label="generate-interview-questions",
+        )
 
-        response = None
-        model_used = None
-        errors: list[str] = []
-        for candidate_model in candidates:
-            try:
-                response = self.client.models.generate_content(
-                    model=candidate_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        top_p=0.9,
-                        response_mime_type="application/json",
-                    ),
-                )
-                model_used = candidate_model
-                break
-            except Exception as exc:
-                errors.append(f"{candidate_model}: {exc}")
-
-        if response is None or model_used is None:
-            joined = " | ".join(errors)
-            raise RuntimeError(
-                f"Gemini request failed for all candidate models. Attempted: {', '.join(candidates)}. Details: {joined}"
-            )
-
-        response_text = getattr(response, "text", "") or ""
-        if not response_text.strip():
-            raise ValueError("Gemini returned an empty response.")
-
-        return {
-            "model": model_used,
-            "prompt": prompt,
-            "response": self._parse_response_json(response_text),
-            "raw_response": self._clean_response_text(response_text),
-        }
+        return self._parse_response_json(response_text)
 
 
 def generate_gemini_agent_response(
     job_description: Mapping[str, Any],
-    questions_per_level: int = 5,
-    model: str = DEFAULT_GEMINI_MODEL,
+    questions_per_level: int = 10,
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Generate interview-question data from Gemini for a job description object."""
+    """Generate interview-question data from OpenRouter for a job description object."""
 
-    agent = GeminiInterviewQuestionAgent(api_key=api_key, model=model)
-    safe_questions_per_level = max(5, questions_per_level)
-    return agent.generate_questions_response(
-        job_description=job_description,
-        questions_per_level=safe_questions_per_level,
-    )
+    agent = OpenRouterInterviewQuestionAgent(api_key=api_key, model=DEFAULT_OPENROUTER_MODEL)
+    safe_questions_per_level = max(10, questions_per_level)
+    return agent.generate_questions_response(job_description=job_description, questions_per_level=safe_questions_per_level)
 
 
 __all__ = [
-    "GeminiInterviewQuestionAgent",
+    "OpenRouterInterviewQuestionAgent",
     "generate_gemini_agent_response",
 ]

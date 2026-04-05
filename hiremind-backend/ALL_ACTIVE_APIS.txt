@@ -204,6 +204,31 @@ Sample payload:
 }
 Round result status values are based on RoundResultStatus enum in codebase.
 
+POST /job-applications/round-results/decision?action=select
+Content-Type: application/json
+Sample payload:
+{
+  "job_id": "67890abc1234",
+  "application_id": "app_001",
+  "candidate_id": "cand_001",
+  "round_id": "round_001",
+  "score": 82,
+  "feedback": "Good problem solving",
+  "evaluated_by": "Interviewer A"
+}
+Query param values:
+- action=select
+- action=reject
+
+Use this single endpoint instead of separate select/reject endpoints.
+
+GET /job-applications/round-results/candidates/by-job/{job_id}/round/{round_id}?status=selected
+Query param values:
+- status=selected
+- status=rejected
+
+Use this single endpoint instead of separate selected/rejected candidate listing endpoints.
+
 GET /job-applications/{application_id}/round-history
 
 ============================================================

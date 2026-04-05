@@ -1,12 +1,15 @@
 from beanie import PydanticObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
+import os
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Path, status
+from fastapi import APIRouter, HTTPException, Path, Query, status
 
 from models.assessment_question_response import AssessmentQuestionResponse
 from models.assessment_questions import AssessmentQuestions
 from models.job_application import JobApplication
 from models.round import Round
+from models.schedule_assessment import ScheduleAssessment
 from models.round_result import RoundResult, RoundResultStatus
 from schemas.job_application import (
     ApplicationStatus,
@@ -22,6 +25,10 @@ from schemas.assessment_questions import (
     AssessmentQuestionsCreateSchema,
     AssessmentQuestionsResponseSchema,
 )
+from schemas.schedule_assessment import (
+    AssessmentInviteRequestSchema,
+    AssessmentInviteResponseSchema,
+)
 from schemas.round import RoundCreateSchema, RoundResponseSchema
 from schemas.round_result import (
     RoundCandidateDecisionSchema,
@@ -29,6 +36,9 @@ from schemas.round_result import (
     RoundResultResponseSchema,
     RoundWiseCandidateSchema,
 )
+from shared.email import send_assessment_invitation_email
+from database import get_db
+from tasks.ai_tasks import ai_screen_resume
 
 router = APIRouter(prefix="/job-applications", tags=["Job Applications"])
 
@@ -40,6 +50,7 @@ def _serialize(doc: JobApplication) -> dict:
         "id": str(doc.id),                           # j_d_id
         "job_id": doc.job_id,
         "candidate_id": doc.candidate_id,
+        "email": doc.email,
         "applicant_name": doc.applicant_name,
         "address": doc.address,
         "highest_qualification": doc.highest_qualification,
@@ -48,6 +59,14 @@ def _serialize(doc: JobApplication) -> dict:
         "ai_score": doc.ai_score,
         "strengths": doc.strengths,
         "weaknesses": doc.weaknesses,
+        "pipeline_snapshot": [
+            {
+                "round_id": item.round_id,
+                "name": item.name,
+                "order": item.order,
+            }
+            for item in (doc.pipeline_snapshot or [])
+        ],
         "current_round": doc.current_round,
         "submit_at": doc.submit_at.isoformat(),
         "status": doc.status,
@@ -119,6 +138,54 @@ def _serialize_assessment_question_response(doc: AssessmentQuestionResponse) -> 
         "submitted_at": doc.submitted_at.isoformat(),
         "updated_at": doc.updated_at.isoformat(),
     }
+
+
+async def _get_user_doc(candidate_id: str) -> dict | None:
+    db = get_db()
+    users = db["users"]
+    return await users.find_one({"$expr": {"$eq": [{"$toString": "$_id"}, candidate_id]}})
+
+
+async def _get_job_title(job_id: str) -> str:
+    db = get_db()
+
+    job_doc = await db["job_posts"].find_one({"jobid": job_id})
+    if not job_doc:
+        legacy_query = {"$expr": {"$eq": [{"$toString": "$_id"}, job_id]}}
+        job_doc = await db["job_posts"].find_one(legacy_query)
+    if job_doc and job_doc.get("title"):
+        return str(job_doc["title"])
+
+    fallback_job_doc = await db["jobs"].find_one({"jobid": job_id})
+    if not fallback_job_doc:
+        legacy_query = {"$expr": {"$eq": [{"$toString": "$_id"}, job_id]}}
+        fallback_job_doc = await db["jobs"].find_one(legacy_query)
+    if fallback_job_doc and fallback_job_doc.get("title"):
+        return str(fallback_job_doc["title"])
+
+    return "the applied role"
+
+
+def _build_assessment_link(assessment_id: str, job_id: str, round_id: str) -> str:
+    base_url = os.getenv(
+        "ASSESSMENT_TEST_BASE_URL",
+        "https://4j2q47l4-8080.inc1.devtunnels.ms/assessment",
+    )
+    return (
+        f"{base_url}/{assessment_id}/test"
+        f"?candidate_id={{candidate_id}}&jobId={job_id}&round_id={round_id}"
+    )
+
+
+def _build_candidate_assessment_link(
+    assessment_id: str,
+    candidate_id: str,
+    job_id: str,
+    round_id: str,
+) -> str:
+    return _build_assessment_link(assessment_id, job_id, round_id).replace(
+        "{candidate_id}", candidate_id
+    )
 
 
 async def _get_or_404(application_id: str) -> JobApplication:
@@ -221,6 +288,9 @@ async def _upsert_round_result_and_progress(
         )
         await result_doc.insert()
 
+    if not application.pipeline_snapshot:
+        application.pipeline_snapshot = await _build_pipeline_snapshot(job_id)
+
     if status_value in {RoundResultStatus.failed, RoundResultStatus.rejected}:
         application.status = ApplicationStatus.rejected
         application.current_round = round_doc.round_order
@@ -245,6 +315,18 @@ async def _upsert_round_result_and_progress(
 
     await application.save()
     return result_doc
+
+
+async def _build_pipeline_snapshot(job_id: str) -> list[dict]:
+    rounds = await Round.find(Round.job_id == job_id).sort(Round.round_order).to_list()
+    return [
+        {
+            "round_id": str(doc.id),
+            "name": doc.round_name,
+            "order": doc.round_order,
+        }
+        for doc in rounds
+    ]
 
 
 async def _round_wise_candidates(
@@ -296,9 +378,12 @@ async def _round_wise_candidates(
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=JobApplicationResponseSchema)
 async def create_job_application(payload: JobApplicationCreateSchema):
     """Submit a new job application and store it in MongoDB."""
+    pipeline_snapshot = await _build_pipeline_snapshot(payload.job_id)
+
     doc = JobApplication(
         job_id=payload.job_id,
         candidate_id=payload.candidate_id,
+        email=payload.email,
         applicant_name=payload.applicant_name,
         address=payload.address,
         highest_qualification=payload.highest_qualification,
@@ -307,10 +392,12 @@ async def create_job_application(payload: JobApplicationCreateSchema):
         ai_score=payload.ai_score,
         strengths=payload.strengths or [],
         weaknesses=payload.weaknesses or [],
-        current_round=payload.current_round,
+        pipeline_snapshot=pipeline_snapshot,
+        current_round=None,
         status=payload.status,
     )
     await doc.insert()
+    ai_screen_resume.delay(str(doc.id))
     return _serialize(doc)
 
 
@@ -338,10 +425,10 @@ async def get_job_application(
 
 @router.get("/by-job/{jobid}", response_model=list[JobApplicationResponseSchema])
 async def get_applications_by_job(jobid: str):
-    """Retrieve all applications submitted for a specific job post."""
+    """Retrieve all applications for a job, sorted by AI score descending."""
     docs = (
         await JobApplication.find(JobApplication.job_id == jobid)
-        .sort(-JobApplication.submit_at)
+        .sort(-JobApplication.ai_score, -JobApplication.submit_at)
         .to_list()
     )
     return [_serialize(d) for d in docs]
@@ -425,6 +512,146 @@ async def get_assessment_questions(jobid: str, round_id: str):
 
 
 @router.post(
+    "/assessment/attach",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AssessmentInviteResponseSchema,
+)
+async def attach_assessment_to_candidates(payload: AssessmentInviteRequestSchema):
+    round_doc = await _get_round_or_404(payload.round_id)
+    if round_doc.job_id != payload.job_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="round_id does not belong to provided job_id",
+        )
+
+    assessment_doc = await AssessmentQuestions.find_one(
+        AssessmentQuestions.job_id == payload.job_id,
+        AssessmentQuestions.round_id == payload.round_id,
+    )
+    if not assessment_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment questions not found for provided jobid and round_id",
+        )
+
+    job_title = await _get_job_title(payload.job_id)
+    assessment_description = f"Assessment round for {job_title}"
+
+    eligible_applications = await JobApplication.find(
+        JobApplication.job_id == payload.job_id,
+        JobApplication.current_round == round_doc.round_order,
+    ).to_list()
+
+    if not eligible_applications:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No candidates found for the requested assessment round",
+        )
+
+    candidate_ids: list[str] = []
+    seen_candidate_ids: set[str] = set()
+    candidate_targets: list[dict[str, str]] = []
+    for application in eligible_applications:
+        if not application.candidate_id:
+            continue
+
+        if application.candidate_id in seen_candidate_ids:
+            continue
+
+        email = application.email
+        user_doc = None
+        if not email:
+            user_doc = await _get_user_doc(application.candidate_id)
+            email = (user_doc or {}).get("email")
+        if not email:
+            continue
+
+        seen_candidate_ids.add(application.candidate_id)
+        candidate_ids.append(application.candidate_id)
+        candidate_targets.append(
+            {
+                "candidate_id": application.candidate_id,
+                "candidate_name": (user_doc or {}).get("name") or application.applicant_name,
+                "email": str(email),
+            }
+        )
+
+    if not candidate_targets:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No candidate emails found for the requested assessment round",
+        )
+
+    start_time = round_doc.start_time or datetime.utcnow()
+    end_time = round_doc.end_time or (start_time + timedelta(hours=1))
+
+    assessment_link_template = _build_assessment_link(
+        assessment_id=str(assessment_doc.id),
+        job_id=payload.job_id,
+        round_id=payload.round_id,
+    )
+
+    schedule_doc = await ScheduleAssessment.find_one(
+        ScheduleAssessment.job_id == payload.job_id,
+        ScheduleAssessment.round_id == payload.round_id,
+    )
+
+    if schedule_doc:
+        schedule_doc.assessment_id = str(assessment_doc.id)
+        schedule_doc.assign_candidate_ids = candidate_ids
+        schedule_doc.assessment_description = assessment_description
+        schedule_doc.assessment_link = assessment_link_template
+        schedule_doc.start_time = start_time
+        schedule_doc.end_time = end_time
+        await schedule_doc.save()
+    else:
+        schedule_doc = ScheduleAssessment(
+            assessment_id=str(assessment_doc.id),
+            job_id=payload.job_id,
+            round_id=payload.round_id,
+            assign_candidate_ids=candidate_ids,
+            assessment_description=assessment_description,
+            assessment_link=assessment_link_template,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        await schedule_doc.insert()
+
+    emailed_count = 0
+    skipped_count = 0
+    for candidate in candidate_targets:
+        candidate_link = _build_candidate_assessment_link(
+            assessment_id=str(assessment_doc.id),
+            candidate_id=candidate["candidate_id"],
+            job_id=payload.job_id,
+            round_id=payload.round_id,
+        )
+        try:
+            await send_assessment_invitation_email(
+                to=candidate["email"],
+                candidate_name=candidate["candidate_name"],
+                job_title=job_title,
+                assessment_link=candidate_link,
+                assessment_description=assessment_description,
+            )
+            emailed_count += 1
+        except Exception:
+            skipped_count += 1
+
+    return {
+        "assessment_id": str(assessment_doc.id),
+        "job_id": payload.job_id,
+        "round_id": payload.round_id,
+        "round_name": round_doc.round_name,
+        "assessment_link": assessment_link_template,
+        "assignment_count": len(candidate_ids),
+        "emailed_count": emailed_count,
+        "skipped_count": skipped_count,
+        "candidate_ids": candidate_ids,
+    }
+
+
+@router.post(
     "/assessment-question-responses",
     status_code=status.HTTP_201_CREATED,
     response_model=AssessmentQuestionResponseSchema,
@@ -496,36 +723,23 @@ async def create_round_result(payload: RoundResultCreateSchema):
 
 
 @router.post(
-    "/round-results/select-candidate",
+    "/round-results/decision",
     status_code=status.HTTP_200_OK,
     response_model=RoundResultResponseSchema,
 )
-async def select_candidate_for_round(payload: RoundCandidateDecisionSchema):
-    doc = await _upsert_round_result_and_progress(
-        job_id=payload.job_id,
-        application_id=payload.application_id,
-        candidate_id=payload.candidate_id,
-        round_id=payload.round_id,
-        status_value=RoundResultStatus.passed,
-        score=payload.score,
-        feedback=payload.feedback,
-        evaluated_by=payload.evaluated_by,
+async def decide_candidate_for_round(
+    payload: RoundCandidateDecisionSchema,
+    action: Literal["select", "reject"] = Query(..., description="Select or reject the candidate"),
+):
+    status_value = (
+        RoundResultStatus.passed if action == "select" else RoundResultStatus.rejected
     )
-    return _serialize_round_result(doc)
-
-
-@router.post(
-    "/round-results/reject-candidate",
-    status_code=status.HTTP_200_OK,
-    response_model=RoundResultResponseSchema,
-)
-async def reject_candidate_for_round(payload: RoundCandidateDecisionSchema):
     doc = await _upsert_round_result_and_progress(
         job_id=payload.job_id,
         application_id=payload.application_id,
         candidate_id=payload.candidate_id,
         round_id=payload.round_id,
-        status_value=RoundResultStatus.rejected,
+        status_value=status_value,
         score=payload.score,
         feedback=payload.feedback,
         evaluated_by=payload.evaluated_by,
@@ -534,22 +748,25 @@ async def reject_candidate_for_round(payload: RoundCandidateDecisionSchema):
 
 
 @router.get(
-    "/round-results/selected-candidates/by-job/{jobid}/round/{round_id}",
+    "/round-results/candidates/by-job/{jobid}/round/{round_id}",
     response_model=list[RoundWiseCandidateSchema],
 )
-async def round_wise_selected_candidates(jobid: str, round_id: str):
-    return await _round_wise_candidates(
-        job_id=jobid,
-        round_id=round_id,
-        statuses={RoundResultStatus.passed},
-    )
+async def round_wise_candidates_by_status(
+    jobid: str,
+    round_id: str,
+    status_filter: Literal["selected", "rejected"] = Query(
+        ...,
+        alias="status",
+        description="Filter candidates by selected or rejected status",
+    ),
+):
+    if status_filter == "selected":
+        return await _round_wise_candidates(
+            job_id=jobid,
+            round_id=round_id,
+            statuses={RoundResultStatus.passed},
+        )
 
-
-@router.get(
-    "/round-results/rejected-candidates/by-job/{jobid}/round/{round_id}",
-    response_model=list[RoundWiseCandidateSchema],
-)
-async def round_wise_rejected_candidates(jobid: str, round_id: str):
     return await _round_wise_candidates(
         job_id=jobid,
         round_id=round_id,

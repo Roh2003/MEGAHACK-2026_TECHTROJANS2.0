@@ -7,7 +7,7 @@ from email.mime.text import MIMEText
 import aiosmtplib
 from dotenv import load_dotenv
 
-from ai_resume_model.utils.ai_email_generator import GeminiEmailAgent
+from ai_resume_model.utils.ai_email_generator import OpenRouterEmailAgent
 
 load_dotenv()
 
@@ -67,6 +67,26 @@ def _fallback_email(
     }
 
 
+def _fallback_assessment_email(
+    candidate_name: str,
+    job_title: str,
+    assessment_link: str,
+    assessment_description: str | None,
+) -> dict[str, str]:
+    description = assessment_description.strip() if assessment_description else "assessment round"
+    return {
+        "subject": f"You have been selected for the next round: {job_title}",
+        "body": (
+            f"<p>Hi {candidate_name},</p>"
+            f"<p>Congratulations! You have moved to the next round for the <b>{job_title}</b> role.</p>"
+            f"<p>This is an <b>{description}</b>. Please complete it using the link below:</p>"
+            f"<p><a href=\"{assessment_link}\">Start Assessment</a></p>"
+            "<p>If the link does not work, copy and paste it into your browser.</p>"
+            "<p>Best regards,<br/>AI Recruitment Team</p>"
+        ),
+    }
+
+
 async def send_email(
     to: str | list[str],
     subject: str,
@@ -101,14 +121,14 @@ async def send_ai_application_result(
     matching_skills: list[str] | None = None,
     weaknesses: list[str] | None = None,
 ):
-    """Draft and send a selection/rejection email using Gemini with safe fallback."""
+    """Draft and send a selection/rejection email using OpenRouter with safe fallback."""
 
     normalized_status = _normalize_status(status)
     matching_skills = matching_skills or []
     weaknesses = weaknesses or []
 
     try:
-        agent = GeminiEmailAgent()
+        agent = OpenRouterEmailAgent()
         result = agent.generate_email(
             candidate_name=candidate_name,
             job_title=job_title,
@@ -121,7 +141,7 @@ async def send_ai_application_result(
         body = str((result or {}).get("body", "")).strip()
 
         if not subject or not body:
-            raise ValueError("Gemini returned invalid output")
+            raise ValueError("OpenRouter returned invalid output")
 
     except Exception:
         fallback = _fallback_email(
@@ -130,6 +150,48 @@ async def send_ai_application_result(
             status=normalized_status,
             matching_skills=matching_skills,
             weaknesses=weaknesses,
+        )
+        subject = fallback["subject"]
+        body = fallback["body"]
+
+    await send_email(
+        to=to,
+        subject=subject,
+        body=body,
+        html=True,
+    )
+
+
+async def send_assessment_invitation_email(
+    to: str,
+    candidate_name: str,
+    job_title: str,
+    assessment_link: str,
+    assessment_description: str | None = None,
+) -> None:
+    """Draft and send an assessment invitation email using OpenRouter with safe fallback."""
+
+    try:
+        agent = OpenRouterEmailAgent()
+        result = agent.generate_assessment_email(
+            candidate_name=candidate_name,
+            job_title=job_title,
+            assessment_link=assessment_link,
+            assessment_description=assessment_description,
+        )
+
+        subject = str((result or {}).get("subject", "")).strip()
+        body = str((result or {}).get("body", "")).strip()
+
+        if not subject or not body:
+            raise ValueError("OpenRouter returned invalid output")
+
+    except Exception:
+        fallback = _fallback_assessment_email(
+            candidate_name=candidate_name,
+            job_title=job_title,
+            assessment_link=assessment_link,
+            assessment_description=assessment_description,
         )
         subject = fallback["subject"]
         body = fallback["body"]

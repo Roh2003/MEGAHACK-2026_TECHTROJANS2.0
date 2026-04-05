@@ -3,10 +3,10 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 from dotenv import load_dotenv
 
-from models.application import Application
 from models.assessment_question_response import AssessmentQuestionResponse
 from models.assessment_questions import AssessmentQuestions
 from models.job_application import JobApplication
+from models.schedule_assessment import ScheduleAssessment
 from models.round import Round
 from models.round_result import RoundResult
 
@@ -24,15 +24,21 @@ async def connect_db() -> None:
     await init_beanie(
         database=_client[DATABASE_NAME],
         document_models=[
-            Application,
             JobApplication,
             Round,
             RoundResult,
             AssessmentQuestions,
             AssessmentQuestionResponse,
+            ScheduleAssessment,
         ],
     )
     print(f"[application-service] Connected to MongoDB — db: {DATABASE_NAME}")
+
+
+def get_db():
+    if _client is None:
+        raise RuntimeError("Database is not connected")
+    return _client[DATABASE_NAME]
 
 
 async def close_db() -> None:

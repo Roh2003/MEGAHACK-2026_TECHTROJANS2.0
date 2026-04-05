@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 
 from beanie import Document
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 
 class ApplicationStatus(str, Enum):
@@ -11,6 +11,12 @@ class ApplicationStatus(str, Enum):
     in_round = "in_round"
     selected = "selected"
     rejected = "rejected"
+
+
+class PipelineSnapshotRound(BaseModel):
+    round_id: str
+    name: str
+    order: int
 
 
 class JobApplication(Document):
@@ -24,6 +30,7 @@ class JobApplication(Document):
 
     job_id: str                                            # FK → JobPost.jobid
     candidate_id: str | None = None                        # FK → User._id
+    email: str | None = None
     applicant_name: str
     address: str
     highest_qualification: str
@@ -32,6 +39,7 @@ class JobApplication(Document):
     ai_score: float | None = None
     strengths: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(default_factory=list)
+    pipeline_snapshot: list[PipelineSnapshotRound] = Field(default_factory=list)
     current_round: int | None = None
     submit_at: datetime = Field(default_factory=datetime.utcnow)
     status: ApplicationStatus = ApplicationStatus.applied
